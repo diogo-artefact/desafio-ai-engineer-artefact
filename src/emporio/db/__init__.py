@@ -1,3 +1,37 @@
-from emporio.db.schema import get_connection, init_schema
+from emporio.db.repository import SQLiteStoreRepository
+from emporio.db.schema import (
+    AuditLogRow,
+    Base,
+    CategoryRow,
+    CustomerRow,
+    KnowledgeSourceRow,
+    MessageRow,
+    OrderItemRow,
+    OrderRow,
+    PolicyChunkRow,
+    ProductRow,
+    PromotionRow,
+    SessionRow,
+    create_db_engine,
+    init_schema,
+    session_scope,
+)
 
-__all__ = ["get_connection", "init_schema"]
+__all__ = [
+    "AuditLogRow",
+    "Base",
+    "CategoryRow",
+    "CustomerRow",
+    "KnowledgeSourceRow",
+    "MessageRow",
+    "OrderItemRow",
+    "OrderRow",
+    "PolicyChunkRow",
+    "ProductRow",
+    "PromotionRow",
+    "SQLiteStoreRepository",
+    "SessionRow",
+    "create_db_engine",
+    "init_schema",
+    "session_scope",
+]

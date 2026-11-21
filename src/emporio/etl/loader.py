@@ -5,7 +5,6 @@ import io
 import json
 import logging
 import re
-import sqlite3
 import unicodedata
 from collections import Counter
 from collections.abc import Mapping
@@ -17,8 +16,20 @@ from typing import Any
 import httpx
 import pdfplumber
 from google.genai import errors as genai_errors
+from sqlalchemy import delete
 
-from emporio.db.schema import get_connection, init_schema
+from emporio.db.schema import (
+    AuditLogRow,
+    CategoryRow,
+    CustomerRow,
+    KnowledgeSourceRow,
+    OrderItemRow,
+    OrderRow,
+    PolicyChunkRow,
+    ProductRow,
+    PromotionRow,
+    session_scope,
+)
 from emporio.etl.embeddings import Embedder
 
 logger = logging.getLogger(__name__)
@@ -359,29 +370,18 @@ def _contextual_chunk_text(chunk: dict[str, Any]) -> str:
     return f"{header}\n{chunk['content']}"
 
 
-def _clear_csv_tables(conn: sqlite3.Connection) -> None:
-    conn.executescript(
-        """
-        DELETE FROM etl_audit_log WHERE entity_type != 'policy_pdf';
-        DELETE FROM order_items;
-        DELETE FROM orders;
-        DELETE FROM promotions;
-        DELETE FROM products_fts;
-        DELETE FROM products;
-        DELETE FROM customers;
-        DELETE FROM categories;
-        """
-    )
-
-
-def _clear_policy_tables(conn: sqlite3.Connection) -> None:
-    conn.executescript(
-        """
-        DELETE FROM etl_audit_log WHERE entity_type = 'policy_pdf';
-        DELETE FROM policy_chunks_fts;
-        DELETE FROM policy_chunks;
-        """
-    )
+def _to_audit_rows(audits: list[AuditEntry]) -> list[AuditLogRow]:
+    return [
+        AuditLogRow(
+            entity_type=a.entity_type,
+            entity_id=a.entity_id,
+            issue_type=a.issue_type,
+            detail=a.detail,
+            raw_value=a.raw_value,
+            curated_value=a.curated_value,
+        )
+        for a in audits
+    ]
 
 
 def ingest_store_csvs(files: Mapping[str, bytes], db_path: Path | str) -> CsvIngestReport:
@@ -428,213 +428,175 @@ def ingest_store_csvs(files: Mapping[str, bytes], db_path: Path | str) -> CsvIng
                 )
             )
 
-    conn = get_connection(db_path)
-    try:
-        init_schema(conn)
-        _clear_csv_tables(conn)
+    product_rows: list[ProductRow] = []
+    sellable_count = 0
+    for row in raw_products:
+        product_id = int(row["product_id"])
+        category_id = int(row["category_id"])
+        category_name = cat_names[category_id]
+        name = row["name"].strip()
+        price_brl = float(row["price_brl"])
+        raw_desc = row["description"].strip()
+        raw_stock = int(row["stock_quantity"])
+        status = row["status"].strip().lower()
+        specs: dict[str, Any] = json.loads(row["specs"]) if row["specs"].strip() else {}
 
-        conn.executemany(
-            "INSERT INTO categories (category_id, name, description) VALUES (?, ?, ?)",
-            [
-                (int(c["category_id"]), c["name"].strip(), c["description"].strip())
-                for c in raw_categories
-            ],
+        stock = raw_stock
+        if status == "discontinued" and raw_stock > 0:
+            stock = 0
+            audits.append(
+                AuditEntry(
+                    entity_type="product",
+                    entity_id=str(product_id),
+                    issue_type="discontinued_nonzero_stock",
+                    detail=f"Produto descontinuado ({name}) tinha estoque {raw_stock} no CSV.",
+                    raw_value=str(raw_stock),
+                    curated_value="0",
+                )
+            )
+
+        if status == "coming_soon" and product_id in ordered_product_ids:
+            audits.append(
+                AuditEntry(
+                    entity_type="product",
+                    entity_id=str(product_id),
+                    issue_type="coming_soon_in_orders",
+                    detail=(
+                        f"Produto em pré-lançamento ({name}) aparece em pedidos históricos; "
+                        "registro mantido com is_sellable=False."
+                    ),
+                    raw_value=f"status={status}, stock={raw_stock}",
+                    curated_value="is_sellable=False",
+                )
+            )
+
+        curated_desc, mismatch_audit = _sanitize_product_description(
+            product_id=str(product_id),
+            name=name,
+            category_name=category_name,
+            raw_description=raw_desc,
+            specs=specs,
         )
+        if mismatch_audit is not None:
+            audits.append(mismatch_audit)
 
-        sellable_count = 0
-        for row in raw_products:
-            product_id = int(row["product_id"])
-            category_id = int(row["category_id"])
-            category_name = cat_names[category_id]
-            name = row["name"].strip()
-            price_brl = float(row["price_brl"])
-            raw_desc = row["description"].strip()
-            raw_stock = int(row["stock_quantity"])
-            status = row["status"].strip().lower()
-            specs: dict[str, Any] = json.loads(row["specs"]) if row["specs"].strip() else {}
+        is_sellable = status == "active" and stock > 0
+        if is_sellable:
+            sellable_count += 1
 
-            stock = raw_stock
-            if status == "discontinued" and raw_stock > 0:
-                stock = 0
-                audits.append(
-                    AuditEntry(
-                        entity_type="product",
-                        entity_id=str(product_id),
-                        issue_type="discontinued_nonzero_stock",
-                        detail=f"Produto descontinuado ({name}) tinha estoque {raw_stock} no CSV.",
-                        raw_value=str(raw_stock),
-                        curated_value="0",
-                    )
-                )
+        specs_text = " ".join(f"{k} {v}" for k, v in specs.items())
+        search_text = normalize_text(f"{name} {category_name} {curated_desc} {specs_text}")
 
-            if status == "coming_soon" and product_id in ordered_product_ids:
-                audits.append(
-                    AuditEntry(
-                        entity_type="product",
-                        entity_id=str(product_id),
-                        issue_type="coming_soon_in_orders",
-                        detail=(
-                            f"Produto em pré-lançamento ({name}) aparece em pedidos históricos; "
-                            "registro mantido com is_sellable=0."
-                        ),
-                        raw_value=f"status={status}, stock={raw_stock}",
-                        curated_value="is_sellable=0",
-                    )
-                )
-
-            curated_desc, mismatch_audit = _sanitize_product_description(
-                product_id=str(product_id),
+        product_rows.append(
+            ProductRow(
+                product_id=product_id,
+                category_id=category_id,
                 name=name,
-                category_name=category_name,
+                price_brl=price_brl,
+                description=curated_desc,
                 raw_description=raw_desc,
-                specs=specs,
+                stock_quantity=stock,
+                status=status,
+                is_sellable=is_sellable,
+                specs_json=json.dumps(specs, ensure_ascii=False),
+                created_at=row["created_at"].strip(),
+                search_text=search_text,
             )
-            if mismatch_audit is not None:
-                audits.append(mismatch_audit)
+        )
 
-            is_sellable = 1 if (status == "active" and stock > 0) else 0
-            if is_sellable:
-                sellable_count += 1
-
-            specs_text = " ".join(f"{k} {v}" for k, v in specs.items())
-            search_text = normalize_text(f"{name} {category_name} {curated_desc} {specs_text}")
-
-            conn.execute(
-                """
-                INSERT INTO products (
-                    product_id, category_id, name, price_brl, description, raw_description,
-                    stock_quantity, status, is_sellable, specs_json, created_at, search_text
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    product_id,
-                    category_id,
-                    name,
-                    price_brl,
-                    curated_desc,
-                    raw_desc,
-                    stock,
-                    status,
-                    is_sellable,
-                    json.dumps(specs, ensure_ascii=False),
-                    row["created_at"].strip(),
-                    search_text,
-                ),
+    promotion_rows: list[PromotionRow] = []
+    active_promos = 0
+    for row in raw_promotions:
+        is_active = str(row["is_active"]).strip() in ("1", "true", "True")
+        if is_active:
+            active_promos += 1
+        promotion_rows.append(
+            PromotionRow(
+                promotion_id=int(row["promotion_id"]),
+                product_id=int(row["product_id"]),
+                discount_percent=float(row["discount_percent"]),
+                description=row["description"].strip(),
+                is_active=is_active,
             )
-            conn.execute(
-                """
-                INSERT INTO products_fts (product_id, name, category_name, description, specs_text)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (product_id, name, category_name, curated_desc, specs_text),
-            )
+        )
 
-        active_promos = 0
-        for row in raw_promotions:
-            is_active = 1 if str(row["is_active"]).strip() in ("1", "true", "True") else 0
-            if is_active:
-                active_promos += 1
-            conn.execute(
-                """
-                INSERT INTO promotions (
-                    promotion_id, product_id, discount_percent, description, is_active
-                ) VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    int(row["promotion_id"]),
-                    int(row["product_id"]),
-                    float(row["discount_percent"]),
-                    row["description"].strip(),
-                    is_active,
-                ),
-            )
+    uploaded_names = [resolved[t][0] for t in REQUIRED_CSV_TABLES]
 
-        for row in raw_customers:
-            name = row["name"].strip()
-            phone = row["phone"].strip()
-            email = row["email"].strip()
-            conn.execute(
-                """
-                INSERT INTO customers (
-                    customer_id, name, name_normalized, phone, phone_digits,
-                    email, email_normalized, city
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    int(row["customer_id"]),
-                    name,
-                    normalize_text(name),
-                    phone,
-                    normalize_phone_digits(phone),
-                    email,
-                    normalize_text(email),
-                    row["city"].strip(),
-                ),
-            )
+    with session_scope(db_path) as session:
+        session.execute(delete(AuditLogRow).where(AuditLogRow.entity_type != "policy_pdf"))
+        session.execute(delete(OrderItemRow))
+        session.execute(delete(OrderRow))
+        session.execute(delete(PromotionRow))
+        session.execute(delete(ProductRow))
+        session.execute(delete(CustomerRow))
+        session.execute(delete(CategoryRow))
 
-        for row in raw_orders:
-            conn.execute(
-                """
-                INSERT INTO orders (
-                    order_id, customer_id, order_date, status, total_brl,
-                    payment_method, tracking_code, estimated_delivery, notes
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    int(row["order_id"]),
-                    int(row["customer_id"]),
-                    row["order_date"].strip(),
-                    row["status"].strip().lower(),
-                    float(row["total_brl"]),
-                    row["payment_method"].strip().lower(),
-                    row["tracking_code"].strip(),
-                    row["estimated_delivery"].strip(),
-                    row["notes"].strip(),
-                ),
-            )
-
-        conn.executemany(
-            "INSERT INTO order_items (order_id, product_id, quantity) VALUES (?, ?, ?)",
+        session.add_all(
             [
-                (int(item["order_id"]), int(item["product_id"]), int(item["quantity"]))
-                for item in raw_order_items
-            ],
+                CategoryRow(
+                    category_id=int(c["category_id"]),
+                    name=c["name"].strip(),
+                    description=c["description"].strip(),
+                )
+                for c in raw_categories
+            ]
         )
-
-        conn.executemany(
-            """
-            INSERT INTO etl_audit_log (
-                entity_type, entity_id, issue_type, detail, raw_value, curated_value
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            """,
+        session.add_all(
             [
-                (a.entity_type, a.entity_id, a.issue_type, a.detail, a.raw_value, a.curated_value)
-                for a in audits
-            ],
+                CustomerRow(
+                    customer_id=int(c["customer_id"]),
+                    name=c["name"].strip(),
+                    name_normalized=normalize_text(c["name"]),
+                    phone=c["phone"].strip(),
+                    phone_digits=normalize_phone_digits(c["phone"]),
+                    email=c["email"].strip(),
+                    email_normalized=normalize_text(c["email"]),
+                    city=c["city"].strip(),
+                )
+                for c in raw_customers
+            ]
         )
-
-        uploaded_names = [resolved[t][0] for t in REQUIRED_CSV_TABLES]
-        conn.execute(
-            """
-            INSERT INTO knowledge_sources (
-                source_key, file_names_json, record_count, audit_count, uploaded_at
-            ) VALUES ('store_csvs', ?, ?, ?, ?)
-            ON CONFLICT(source_key) DO UPDATE SET
-                file_names_json = excluded.file_names_json,
-                record_count = excluded.record_count,
-                audit_count = excluded.audit_count,
-                uploaded_at = excluded.uploaded_at
-            """,
-            (
-                json.dumps(uploaded_names, ensure_ascii=False),
-                len(raw_products),
-                len(audits),
-                datetime.now(UTC).isoformat(),
-            ),
+        session.flush()
+        session.add_all(product_rows)
+        session.add_all(
+            [
+                OrderRow(
+                    order_id=int(o["order_id"]),
+                    customer_id=int(o["customer_id"]),
+                    order_date=o["order_date"].strip(),
+                    status=o["status"].strip().lower(),
+                    total_brl=float(o["total_brl"]),
+                    payment_method=o["payment_method"].strip().lower(),
+                    tracking_code=o["tracking_code"].strip(),
+                    estimated_delivery=o["estimated_delivery"].strip(),
+                    notes=o["notes"].strip(),
+                )
+                for o in raw_orders
+            ]
         )
-        conn.commit()
-    finally:
-        conn.close()
+        session.flush()
+        session.add_all(promotion_rows)
+        session.add_all(
+            [
+                OrderItemRow(
+                    order_id=int(it["order_id"]),
+                    product_id=int(it["product_id"]),
+                    quantity=int(it["quantity"]),
+                )
+                for it in raw_order_items
+            ]
+        )
+        session.add_all(_to_audit_rows(audits))
+        session.flush()
+        session.merge(
+            KnowledgeSourceRow(
+                source_key="store_csvs",
+                file_names_json=json.dumps(uploaded_names, ensure_ascii=False),
+                record_count=len(raw_products),
+                audit_count=len(audits),
+                uploaded_at=datetime.now(UTC).isoformat(),
+            )
+        )
 
     return CsvIngestReport(
         categories=len(raw_categories),
@@ -667,75 +629,39 @@ def ingest_policy_pdf(
             if len(computed) == len(chunks):
                 vectors = computed
         except (genai_errors.APIError, httpx.HTTPError, OSError) as exc:
-            logger.warning("Falha ao gerar embeddings do PDF; seguindo com FTS5: %s", exc)
+            logger.warning("Falha ao gerar embeddings do PDF: %s", exc)
 
     embedded_count = sum(1 for v in vectors if v is not None)
 
-    conn = get_connection(db_path)
-    try:
-        init_schema(conn)
-        _clear_policy_tables(conn)
+    with session_scope(db_path) as session:
+        session.execute(delete(AuditLogRow).where(AuditLogRow.entity_type == "policy_pdf"))
+        session.execute(delete(PolicyChunkRow))
 
-        for chunk, vec in zip(chunks, vectors, strict=True):
-            conn.execute(
-                """
-                INSERT INTO policy_chunks (
-                    chunk_id, section_number, parent_title, title,
-                    content, page_start, page_end, embedding_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    chunk["chunk_id"],
-                    chunk["section_number"],
-                    chunk["parent_title"],
-                    chunk["title"],
-                    chunk["content"],
-                    chunk["page_start"],
-                    chunk["page_end"],
-                    json.dumps(vec) if vec is not None else None,
-                ),
-            )
-            conn.execute(
-                """
-                INSERT INTO policy_chunks_fts (chunk_id, parent_title, title, content)
-                VALUES (?, ?, ?, ?)
-                """,
-                (chunk["chunk_id"], chunk["parent_title"], chunk["title"], chunk["content"]),
-            )
-
-        conn.executemany(
-            """
-            INSERT INTO etl_audit_log (
-                entity_type, entity_id, issue_type, detail, raw_value, curated_value
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            """,
+        session.add_all(
             [
-                (a.entity_type, a.entity_id, a.issue_type, a.detail, a.raw_value, a.curated_value)
-                for a in audits
-            ],
+                PolicyChunkRow(
+                    chunk_id=chunk["chunk_id"],
+                    section_number=chunk["section_number"],
+                    parent_title=chunk["parent_title"],
+                    title=chunk["title"],
+                    content=chunk["content"],
+                    page_start=chunk["page_start"],
+                    page_end=chunk["page_end"],
+                    embedding_json=json.dumps(vec) if vec is not None else None,
+                )
+                for chunk, vec in zip(chunks, vectors, strict=True)
+            ]
         )
-
-        conn.execute(
-            """
-            INSERT INTO knowledge_sources (
-                source_key, file_names_json, record_count, audit_count, uploaded_at
-            ) VALUES ('policy_pdf', ?, ?, ?, ?)
-            ON CONFLICT(source_key) DO UPDATE SET
-                file_names_json = excluded.file_names_json,
-                record_count = excluded.record_count,
-                audit_count = excluded.audit_count,
-                uploaded_at = excluded.uploaded_at
-            """,
-            (
-                json.dumps([filename], ensure_ascii=False),
-                len(chunks),
-                len(audits),
-                datetime.now(UTC).isoformat(),
-            ),
+        session.add_all(_to_audit_rows(audits))
+        session.merge(
+            KnowledgeSourceRow(
+                source_key="policy_pdf",
+                file_names_json=json.dumps([filename], ensure_ascii=False),
+                record_count=len(chunks),
+                audit_count=len(audits),
+                uploaded_at=datetime.now(UTC).isoformat(),
+            )
         )
-        conn.commit()
-    finally:
-        conn.close()
 
     return PdfIngestReport(
         filename=filename,

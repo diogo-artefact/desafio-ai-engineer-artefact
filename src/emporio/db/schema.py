@@ -1,149 +1,193 @@
 from __future__ import annotations
 
-import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_SQL = """
-PRAGMA foreign_keys = ON;
-
-CREATE TABLE IF NOT EXISTS categories (
-    category_id INTEGER PRIMARY KEY,
-    name TEXT NOT NULL,
-    description TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS products (
-    product_id INTEGER PRIMARY KEY,
-    category_id INTEGER NOT NULL REFERENCES categories(category_id),
-    name TEXT NOT NULL,
-    price_brl REAL NOT NULL,
-    description TEXT NOT NULL,
-    raw_description TEXT NOT NULL,
-    stock_quantity INTEGER NOT NULL,
-    status TEXT NOT NULL,
-    is_sellable INTEGER NOT NULL CHECK (is_sellable IN (0, 1)),
-    specs_json TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    search_text TEXT NOT NULL
-);
-
-CREATE VIRTUAL TABLE IF NOT EXISTS products_fts USING fts5(
-    product_id UNINDEXED,
-    name,
-    category_name,
-    description,
-    specs_text,
-    tokenize = 'unicode61 remove_diacritics 2'
-);
-
-CREATE TABLE IF NOT EXISTS promotions (
-    promotion_id INTEGER PRIMARY KEY,
-    product_id INTEGER NOT NULL REFERENCES products(product_id),
-    discount_percent REAL NOT NULL,
-    description TEXT NOT NULL,
-    is_active INTEGER NOT NULL CHECK (is_active IN (0, 1))
-);
-
-CREATE TABLE IF NOT EXISTS customers (
-    customer_id INTEGER PRIMARY KEY,
-    name TEXT NOT NULL,
-    name_normalized TEXT NOT NULL,
-    phone TEXT NOT NULL,
-    phone_digits TEXT NOT NULL,
-    email TEXT NOT NULL,
-    email_normalized TEXT NOT NULL,
-    city TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_customers_email_norm ON customers(email_normalized);
-CREATE INDEX IF NOT EXISTS idx_customers_phone_digits ON customers(phone_digits);
-
-CREATE TABLE IF NOT EXISTS orders (
-    order_id INTEGER PRIMARY KEY,
-    customer_id INTEGER NOT NULL REFERENCES customers(customer_id),
-    order_date TEXT NOT NULL,
-    status TEXT NOT NULL,
-    total_brl REAL NOT NULL,
-    payment_method TEXT NOT NULL,
-    tracking_code TEXT NOT NULL DEFAULT '',
-    estimated_delivery TEXT NOT NULL DEFAULT '',
-    notes TEXT NOT NULL DEFAULT ''
-);
-
-CREATE TABLE IF NOT EXISTS order_items (
-    order_id INTEGER NOT NULL REFERENCES orders(order_id),
-    product_id INTEGER NOT NULL REFERENCES products(product_id),
-    quantity INTEGER NOT NULL,
-    PRIMARY KEY (order_id, product_id)
-);
-
-CREATE TABLE IF NOT EXISTS policy_chunks (
-    chunk_id TEXT PRIMARY KEY,
-    section_number TEXT NOT NULL,
-    parent_title TEXT NOT NULL,
-    title TEXT NOT NULL,
-    content TEXT NOT NULL,
-    page_start INTEGER NOT NULL,
-    page_end INTEGER NOT NULL,
-    embedding_json TEXT
-);
-
-CREATE VIRTUAL TABLE IF NOT EXISTS policy_chunks_fts USING fts5(
-    chunk_id UNINDEXED,
-    parent_title,
-    title,
-    content,
-    tokenize = 'unicode61 remove_diacritics 2'
-);
-
-CREATE TABLE IF NOT EXISTS knowledge_sources (
-    source_key TEXT PRIMARY KEY CHECK (source_key IN ('store_csvs', 'policy_pdf')),
-    file_names_json TEXT NOT NULL,
-    record_count INTEGER NOT NULL,
-    audit_count INTEGER NOT NULL,
-    uploaded_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS etl_audit_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    entity_type TEXT NOT NULL,
-    entity_id TEXT NOT NULL,
-    issue_type TEXT NOT NULL,
-    detail TEXT NOT NULL,
-    raw_value TEXT NOT NULL DEFAULT '',
-    curated_value TEXT NOT NULL DEFAULT ''
-);
-
-CREATE TABLE IF NOT EXISTS sessions (
-    session_id TEXT PRIMARY KEY,
-    title TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
-    role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
-    content TEXT NOT NULL,
-    trace_json TEXT NOT NULL DEFAULT '[]',
-    created_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id);
-"""
+from sqlalchemy import (
+    Boolean,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    create_engine,
+    event,
+)
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 
-def get_connection(db_path: Path | str) -> sqlite3.Connection:
+class Base(DeclarativeBase):
+    pass
+
+
+class CategoryRow(Base):
+    __tablename__ = "categories"
+
+    category_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class ProductRow(Base):
+    __tablename__ = "products"
+
+    product_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    category_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("categories.category_id"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    price_brl: Mapped[float] = mapped_column(Float, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    raw_description: Mapped[str] = mapped_column(Text, nullable=False)
+    stock_quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    is_sellable: Mapped[bool] = mapped_column(Boolean, nullable=False, index=True)
+    specs_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str] = mapped_column(String(32), nullable=False)
+    search_text: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class PromotionRow(Base):
+    __tablename__ = "promotions"
+
+    promotion_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    product_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("products.product_id"), nullable=False, index=True
+    )
+    discount_percent: Mapped[float] = mapped_column(Float, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, index=True)
+
+
+class CustomerRow(Base):
+    __tablename__ = "customers"
+
+    customer_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    name_normalized: Mapped[str] = mapped_column(String(200), nullable=False)
+    phone: Mapped[str] = mapped_column(String(40), nullable=False)
+    phone_digits: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    email: Mapped[str] = mapped_column(String(200), nullable=False)
+    email_normalized: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    city: Mapped[str] = mapped_column(String(120), nullable=False)
+
+
+class OrderRow(Base):
+    __tablename__ = "orders"
+
+    order_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    customer_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("customers.customer_id"), nullable=False, index=True
+    )
+    order_date: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    total_brl: Mapped[float] = mapped_column(Float, nullable=False)
+    payment_method: Mapped[str] = mapped_column(String(64), nullable=False)
+    tracking_code: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    estimated_delivery: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    notes: Mapped[str] = mapped_column(Text, nullable=False, default="")
+
+
+class OrderItemRow(Base):
+    __tablename__ = "order_items"
+
+    order_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("orders.order_id"), primary_key=True
+    )
+    product_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("products.product_id"), primary_key=True
+    )
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class PolicyChunkRow(Base):
+    __tablename__ = "policy_chunks"
+
+    chunk_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    section_number: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    parent_title: Mapped[str] = mapped_column(String(200), nullable=False)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    page_start: Mapped[int] = mapped_column(Integer, nullable=False)
+    page_end: Mapped[int] = mapped_column(Integer, nullable=False)
+    embedding_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class KnowledgeSourceRow(Base):
+    __tablename__ = "knowledge_sources"
+
+    source_key: Mapped[str] = mapped_column(String(32), primary_key=True)
+    file_names_json: Mapped[str] = mapped_column(Text, nullable=False)
+    record_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    audit_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    uploaded_at: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class AuditLogRow(Base):
+    __tablename__ = "etl_audit_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    entity_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    entity_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    issue_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    detail: Mapped[str] = mapped_column(Text, nullable=False)
+    raw_value: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    curated_value: Mapped[str] = mapped_column(Text, nullable=False, default="")
+
+
+class SessionRow(Base):
+    __tablename__ = "sessions"
+
+    session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    created_at: Mapped[str] = mapped_column(String(64), nullable=False)
+    updated_at: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+
+
+class MessageRow(Base):
+    __tablename__ = "messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("sessions.session_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    trace_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    created_at: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+def create_db_engine(db_path: Path | str) -> Engine:
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON;")
-    conn.execute("PRAGMA journal_mode = WAL;")
-    return conn
+    engine = create_engine(f"sqlite:///{path.resolve()}", future=True)
+
+    @event.listens_for(engine, "connect")
+    def _configure_sqlite(dbapi_connection, _connection_record) -> None:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.close()
+
+    return engine
 
 
-def init_schema(conn: sqlite3.Connection) -> None:
-    conn.executescript(SCHEMA_SQL)
-    conn.commit()
+def init_schema(engine: Engine) -> None:
+    Base.metadata.create_all(engine)
+
+
+@contextmanager
+def session_scope(db_path: Path | str) -> Iterator[Session]:
+    engine = create_db_engine(db_path)
+    try:
+        init_schema(engine)
+        with Session(engine) as session:
+            yield session
+            session.commit()
+    finally:
+        engine.dispose()
