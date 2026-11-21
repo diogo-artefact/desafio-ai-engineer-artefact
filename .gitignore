@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Generated local database & runtime artifacts
+data/emporio.db
+data/emporio.db-shm
+data/emporio.db-wal
+
+# Frontend
+web/node_modules/
+web/dist/
+web/.vite/
+
+# OS & editor
+.DS_Store
+.vscode/
+.idea/
