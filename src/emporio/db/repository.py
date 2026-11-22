@@ -36,8 +36,8 @@ from emporio.domain.models import (
     ProductSummary,
     PromotionInfo,
 )
+from emporio.domain.text import normalize_phone_digits, normalize_text
 from emporio.etl.embeddings import Embedder, cosine_similarity
-from emporio.etl.loader import normalize_phone_digits, normalize_text
 
 logger = logging.getLogger(__name__)
 

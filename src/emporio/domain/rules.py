@@ -11,7 +11,7 @@ from emporio.domain.models import (
     ShippingQuote,
     StoreHoursStatus,
 )
-from emporio.etl.loader import normalize_text
+from emporio.domain.text import normalize_text
 
 STORE_TZ = ZoneInfo("America/Campo_Grande")
 PIX_DISCOUNT_RATE = 0.05

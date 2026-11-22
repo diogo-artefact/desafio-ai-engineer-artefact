@@ -5,7 +5,6 @@ import io
 import json
 import logging
 import re
-import unicodedata
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -30,6 +29,7 @@ from emporio.db.schema import (
     PromotionRow,
     session_scope,
 )
+from emporio.domain.text import normalize_phone_digits, normalize_text
 from emporio.etl.embeddings import Embedder
 
 logger = logging.getLogger(__name__)
@@ -134,16 +134,6 @@ class PdfIngestReport:
 class ETLReport:
     csv: CsvIngestReport
     pdf: PdfIngestReport
-
-
-def normalize_text(value: str) -> str:
-    decomposed = unicodedata.normalize("NFKD", value)
-    without_accents = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
-    return re.sub(r"\s+", " ", without_accents.lower()).strip()
-
-
-def normalize_phone_digits(phone: str) -> str:
-    return re.sub(r"\D", "", phone)
 
 
 def _find_brands(text: str) -> set[str]:
