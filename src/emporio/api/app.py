@@ -12,9 +12,10 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import httpx
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from google.genai import errors as genai_errors
 from pdfplumber.utils.exceptions import PdfminerException
 from pydantic import BaseModel, Field
@@ -89,33 +90,82 @@ STORE_PROFILE: dict[str, Any] = {
 }
 
 
+OPENAPI_TAGS: list[dict[str, str]] = [
+    {
+        "name": "Sistema",
+        "description": "Saúde do serviço e informações públicas da Empório da Música.",
+    },
+    {
+        "name": "Autenticação",
+        "description": "Login, cadastro de clientes e verificação da sessão via token HMAC.",
+    },
+    {
+        "name": "Chat",
+        "description": "Streaming SSE do agente de atendimento com Gemini 4 e guardrail Jev.",
+    },
+    {
+        "name": "Conversas",
+        "description": "Histórico de sessões, mensagens e cards de pedido do usuário.",
+    },
+    {
+        "name": "Pedidos",
+        "description": "Confirmação ou cancelamento human-in-the-loop dos pedidos gerados no chat.",
+    },
+    {
+        "name": "Personalização e Memória",
+        "description": "Instruções de estilo validadas por guardrail e memórias da conta.",
+    },
+    {
+        "name": "Gestão (Admin)",
+        "description": "Upload da base operacional e PDF, modelo Gemini 4 ativo e ferramentas.",
+    },
+]
+
+bearer_scheme = HTTPBearer(
+    auto_error=False,
+    description="Token HMAC retornado por POST /api/auth/login ou POST /api/auth/register.",
+)
+
+
 class LoginRequest(BaseModel):
-    email: str = Field(min_length=3)
-    password: str = Field(min_length=1)
+    email: str = Field(min_length=3, description="E-mail da conta cadastrada.")
+    password: str = Field(min_length=1, description="Senha da conta.")
 
 
 class RegisterRequest(BaseModel):
-    name: str = ""
-    email: str = Field(min_length=3)
-    password: str = Field(min_length=6)
+    name: str = Field(default="", description="Nome exibido no atendimento.")
+    email: str = Field(min_length=3, description="E-mail único da nova conta de cliente.")
+    password: str = Field(min_length=6, description="Senha com no mínimo 6 caracteres.")
 
 
 class CreateSessionRequest(BaseModel):
-    title: str = "Nova conversa"
+    title: str = Field(default="Nova conversa", description="Título inicial da conversa.")
 
 
 class ChatRequest(BaseModel):
-    session_id: str | None = None
-    message: str = Field(min_length=1)
-    enabled_tools: list[str] | None = None
+    session_id: str | None = Field(
+        default=None,
+        description="ID de uma conversa existente. Omitido para criar uma nova conversa.",
+    )
+    message: str = Field(min_length=1, description="Mensagem enviada pelo usuário.")
+    enabled_tools: list[str] | None = Field(
+        default=None,
+        description="Lista opcional de ferramentas ativas (restrito ao perfil gestor).",
+    )
 
 
 class UpdateModelRequest(BaseModel):
-    model_id: str = Field(min_length=1)
+    model_id: str = Field(
+        min_length=1,
+        description="Identificador de um dos modelos Gemini 4 permitidos.",
+    )
 
 
 class UpdatePersonalizationRequest(BaseModel):
-    custom_instructions: str = ""
+    custom_instructions: str = Field(
+        default="",
+        description="Instruções de estilo e formato validadas por regras e guardrail Jev.",
+    )
 
 
 def _sse_line(payload: dict[str, Any]) -> str:
@@ -199,12 +249,16 @@ def _is_valid_email(email: str) -> bool:
 
 def require_user(
     request: Request,
-    authorization: Annotated[str | None, Header()] = None,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)] = None,
 ) -> AuthenticatedUser:
     deps: AppContainer = request.app.state.container
-    if not authorization or not authorization.startswith("Bearer "):
+    if (
+        credentials is None
+        or credentials.scheme.lower() != "bearer"
+        or not credentials.credentials.strip()
+    ):
         raise HTTPException(status_code=401, detail="Autenticação obrigatória.")
-    token = authorization.removeprefix("Bearer ").strip()
+    token = credentials.credentials.strip()
     payload = verify_token(token, deps.settings.auth_secret)
     if payload is None or not isinstance(payload.get("sub"), str):
         raise HTTPException(status_code=401, detail="Sessão expirada ou inválida.")
@@ -245,7 +299,29 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
             except asyncio.CancelledError:
                 pass
 
-    api = FastAPI(title="Empório da Música API", version="0.1.0", lifespan=lifespan)
+    api = FastAPI(
+        title="Empório da Música API",
+        version="1.0.0",
+        description=(
+            "API do assistente de atendimento da Empório da Música (Campo Grande, MS). "
+            "Combina consultas exatas via SQLAlchemy ORM em SQLite, busca vetorial no manual "
+            "PDF com Gemini Embeddings, guardrail de entrada System One (Jev), gateways "
+            "determinísticos de privacidade (LGPD), pedidos por chat (human-in-the-loop) "
+            "e rate limit sliding-window."
+        ),
+        openapi_tags=OPENAPI_TAGS,
+        servers=[
+            {
+                "url": "https://artefact-api.diogo.sh",
+                "description": "Produção (AWS EC2 + Caddy)",
+            },
+            {
+                "url": "http://127.0.0.1:8000",
+                "description": "Desenvolvimento local",
+            },
+        ],
+        lifespan=lifespan,
+    )
     api.add_middleware(
         CORSMiddleware,
         allow_origins=deps.settings.cors_origins_list,
@@ -266,7 +342,15 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
                 headers={"Retry-After": str(retry_after)},
             )
 
-    @api.post("/api/auth/login")
+    @api.post(
+        "/api/auth/login",
+        tags=["Autenticação"],
+        summary="Autenticar usuário",
+        description=(
+            "Valida e-mail e senha (scrypt) e emite token HMAC Bearer. "
+            "Protegido por rate limit por IP."
+        ),
+    )
     def login(body: LoginRequest, request: Request) -> dict[str, Any]:
         _enforce_rate_limit(
             f"auth:{_client_ip(request)}",
@@ -282,7 +366,16 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
         token = issue_token(user, deps.settings.auth_secret)
         return {"token": token, "user": user.model_dump()}
 
-    @api.post("/api/auth/register", status_code=201)
+    @api.post(
+        "/api/auth/register",
+        status_code=201,
+        tags=["Autenticação"],
+        summary="Criar conta de cliente",
+        description=(
+            "Registra nova conta com perfil customer e retorna token HMAC Bearer. "
+            "Protegido por rate limit por IP."
+        ),
+    )
     def register(body: RegisterRequest, request: Request) -> dict[str, Any]:
         _enforce_rate_limit(
             f"auth:{_client_ip(request)}",
@@ -303,23 +396,39 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
         token = issue_token(user, deps.settings.auth_secret)
         return {"token": token, "user": user.model_dump()}
 
-    @api.get("/api/auth/me")
+    @api.get(
+        "/api/auth/me",
+        tags=["Autenticação"],
+        summary="Consultar usuário autenticado",
+    )
     def me(user: Annotated[AuthenticatedUser, Depends(require_user)]) -> dict[str, Any]:
         return {"user": user.model_dump()}
 
-    @api.get("/api/health")
+    @api.get(
+        "/api/health",
+        tags=["Sistema"],
+        summary="Verificar saúde da API e prontidão da base",
+    )
     def health() -> dict[str, Any]:
         knowledge = deps.repo.get_knowledge_status()
         return {"status": "ok", "ready": knowledge.ready}
 
-    @api.get("/api/store")
+    @api.get(
+        "/api/store",
+        tags=["Sistema"],
+        summary="Obter dados públicos e expediente da loja",
+    )
     def store_info() -> dict[str, Any]:
         return {
             **STORE_PROFILE,
             "hours": check_store_hours().model_dump(),
         }
 
-    @api.get("/api/knowledge")
+    @api.get(
+        "/api/knowledge",
+        tags=["Gestão (Admin)"],
+        summary="Consultar status dos slots de ingestão (CSVs e PDF)",
+    )
     def knowledge_status(
         _admin: Annotated[AuthenticatedUser, Depends(require_admin)],
     ) -> dict[str, Any]:
@@ -329,7 +438,15 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
             "required_csv_tables": list(REQUIRED_CSV_TABLES),
         }
 
-    @api.post("/api/knowledge/csvs")
+    @api.post(
+        "/api/knowledge/csvs",
+        tags=["Gestão (Admin)"],
+        summary="Carregar e sanitizar os 6 CSVs operacionais",
+        description=(
+            "Recebe os 6 arquivos CSV ou um .zip, aplica sanitização auditável em "
+            "etl_audit_log e sincroniza contas de clientes."
+        ),
+    )
     async def upload_csvs(
         files: Annotated[list[UploadFile], File()],
         _admin: Annotated[AuthenticatedUser, Depends(require_admin)],
@@ -362,7 +479,15 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
             "knowledge": deps.repo.get_knowledge_status().model_dump(),
         }
 
-    @api.post("/api/knowledge/pdf")
+    @api.post(
+        "/api/knowledge/pdf",
+        tags=["Gestão (Admin)"],
+        summary="Carregar manual de políticas (PDF) e gerar embeddings",
+        description=(
+            "Segmenta o PDF em seções/subseções, audita inconsistências de contato e gera "
+            "embeddings gemini-embedding-001."
+        ),
+    )
     async def upload_pdf(
         file: Annotated[UploadFile, File()],
         _admin: Annotated[AuthenticatedUser, Depends(require_admin)],
@@ -390,13 +515,22 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
             "knowledge": deps.repo.get_knowledge_status().model_dump(),
         }
 
-    @api.get("/api/sessions")
+    @api.get(
+        "/api/sessions",
+        tags=["Conversas"],
+        summary="Listar conversas do usuário autenticado",
+    )
     def list_sessions(
         user: Annotated[AuthenticatedUser, Depends(require_user)],
     ) -> dict[str, Any]:
         return {"sessions": deps.repo.list_sessions(user_id=user.user_id)}
 
-    @api.post("/api/sessions", status_code=201)
+    @api.post(
+        "/api/sessions",
+        status_code=201,
+        tags=["Conversas"],
+        summary="Criar nova conversa",
+    )
     def create_session(
         user: Annotated[AuthenticatedUser, Depends(require_user)],
         body: CreateSessionRequest | None = None,
@@ -409,7 +543,11 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
             raise HTTPException(status_code=500, detail="Erro ao criar conversa.")
         return created
 
-    @api.get("/api/sessions/{session_id}")
+    @api.get(
+        "/api/sessions/{session_id}",
+        tags=["Conversas"],
+        summary="Carregar mensagens, trace e cards de pedido da conversa",
+    )
     def get_session(
         session_id: str,
         user: Annotated[AuthenticatedUser, Depends(require_user)],
@@ -431,7 +569,15 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
             "order_drafts": order_drafts,
         }
 
-    @api.post("/api/orders/drafts/{draft_id}/confirm")
+    @api.post(
+        "/api/orders/drafts/{draft_id}/confirm",
+        tags=["Pedidos"],
+        summary="Confirmar pedido gerado no chat",
+        description=(
+            "Grava o pedido na tabela orders com baixa de estoque, código de rastreio e "
+            "entrega simulada após 5 minutos."
+        ),
+    )
     def confirm_order_draft(
         draft_id: str,
         user: Annotated[AuthenticatedUser, Depends(require_user)],
@@ -452,7 +598,11 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
             "message": message,
         }
 
-    @api.post("/api/orders/drafts/{draft_id}/cancel")
+    @api.post(
+        "/api/orders/drafts/{draft_id}/cancel",
+        tags=["Pedidos"],
+        summary="Cancelar rascunho de pedido pendente",
+    )
     def cancel_order_draft(
         draft_id: str,
         user: Annotated[AuthenticatedUser, Depends(require_user)],
@@ -465,7 +615,12 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"draft": draft.model_dump()}
 
-    @api.delete("/api/sessions/{session_id}", status_code=204)
+    @api.delete(
+        "/api/sessions/{session_id}",
+        status_code=204,
+        tags=["Conversas"],
+        summary="Excluir conversa do usuário",
+    )
     def delete_session(
         session_id: str,
         user: Annotated[AuthenticatedUser, Depends(require_user)],
@@ -473,7 +628,11 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
         deps.repo.delete_session(session_id, user_id=user.user_id)
         return Response(status_code=204)
 
-    @api.get("/api/memories")
+    @api.get(
+        "/api/memories",
+        tags=["Personalização e Memória"],
+        summary="Listar memórias duráveis da conta",
+    )
     def list_memories(
         user: Annotated[AuthenticatedUser, Depends(require_user)],
     ) -> dict[str, Any]:
@@ -483,7 +642,12 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
             ]
         }
 
-    @api.delete("/api/memories/{fact_key}", status_code=204)
+    @api.delete(
+        "/api/memories/{fact_key}",
+        status_code=204,
+        tags=["Personalização e Memória"],
+        summary="Remover uma memória específica da conta",
+    )
     def delete_memory(
         fact_key: str,
         user: Annotated[AuthenticatedUser, Depends(require_user)],
@@ -491,14 +655,23 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
         deps.repo.delete_user_memory(user.user_id, fact_key)
         return Response(status_code=204)
 
-    @api.delete("/api/memories", status_code=204)
+    @api.delete(
+        "/api/memories",
+        status_code=204,
+        tags=["Personalização e Memória"],
+        summary="Limpar todas as memórias da conta",
+    )
     def clear_memories(
         user: Annotated[AuthenticatedUser, Depends(require_user)],
     ) -> Response:
         deps.repo.clear_user_memories(user.user_id)
         return Response(status_code=204)
 
-    @api.get("/api/personalization")
+    @api.get(
+        "/api/personalization",
+        tags=["Personalização e Memória"],
+        summary="Obter instruções personalizadas e memórias da conta",
+    )
     def get_personalization(
         user: Annotated[AuthenticatedUser, Depends(require_user)],
     ) -> dict[str, Any]:
@@ -510,7 +683,11 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
             ],
         }
 
-    @api.put("/api/personalization")
+    @api.put(
+        "/api/personalization",
+        tags=["Personalização e Memória"],
+        summary="Atualizar instruções de estilo (validadas por guardrail)",
+    )
     async def update_personalization(
         body: UpdatePersonalizationRequest,
         user: Annotated[AuthenticatedUser, Depends(require_user)],
@@ -535,7 +712,11 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
             ],
         }
 
-    @api.get("/api/tools")
+    @api.get(
+        "/api/tools",
+        tags=["Gestão (Admin)"],
+        summary="Listar ferramentas disponíveis do agente",
+    )
     def list_tools(
         _admin: Annotated[AuthenticatedUser, Depends(require_admin)],
     ) -> dict[str, Any]:
@@ -563,13 +744,21 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
             ],
         }
 
-    @api.get("/api/models")
+    @api.get(
+        "/api/models",
+        tags=["Gestão (Admin)"],
+        summary="Listar modelos Gemini 4 e modelo ativo",
+    )
     def list_models(
         _admin: Annotated[AuthenticatedUser, Depends(require_admin)],
     ) -> dict[str, Any]:
         return _models_payload()
 
-    @api.put("/api/models")
+    @api.put(
+        "/api/models",
+        tags=["Gestão (Admin)"],
+        summary="Alterar modelo Gemini 4 ativo no atendimento",
+    )
     def update_model(
         body: UpdateModelRequest,
         _admin: Annotated[AuthenticatedUser, Depends(require_admin)],
@@ -583,7 +772,16 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
         deps.repo.set_setting("active_model", chosen)
         return _models_payload()
 
-    @api.post("/api/chat")
+    @api.post(
+        "/api/chat",
+        tags=["Chat"],
+        summary="Enviar mensagem com resposta em streaming SSE",
+        description=(
+            "Retorna text/event-stream com eventos session, thinking_start/delta/end, "
+            "tool_start/end, text_delta, order_draft, session_title, done e error. "
+            "Protegido por rate limit por usuário."
+        ),
+    )
     async def chat_stream(
         body: ChatRequest,
         user: Annotated[AuthenticatedUser, Depends(require_user)],

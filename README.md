@@ -6,7 +6,7 @@ Feito por Diogo de Souza em [diogo.sh](https://diogo.sh).
 
 ## Demo online
 
-A aplicação está publicada em [artefact.diogo.sh](https://artefact.diogo.sh) com a base da loja e os embeddings do manual já carregados. O frontend roda no AWS Amplify e a API roda em uma instância EC2 `t4g.small` em `sa-east-1` atrás de Caddy com HTTPS automático, carregando segredos direto em memória via AWS Secrets Manager (sem `.env` em disco) e sem porta SSH exposta.
+A aplicação está publicada em [artefact.diogo.sh](https://artefact.diogo.sh) com a base da loja e os embeddings do manual já carregados. O frontend roda no AWS Amplify e a API roda em uma instância EC2 `t4g.small` em `sa-east-1` atrás de Caddy com HTTPS automático, carregando segredos direto em memória via AWS Secrets Manager (sem `.env` em disco) e sem porta SSH exposta. A documentação interativa OpenAPI 3.1 está disponível em [artefact-api.diogo.sh/docs](https://artefact-api.diogo.sh/docs) (especificação exportada em [`docs/openapi.json`](docs/openapi.json)).
 
 Todas as contas pré-cadastradas na demo online usam a senha `Artefact#123`.
 
@@ -132,7 +132,7 @@ uv run python -m emporio.evals --model google:gemini-4-hydrogen --with-judge
 
 - **Observabilidade em produção.** Hoje os traces por mensagem e o histórico de auditoria do ETL ficam persistidos no SQLite para inspeção local e evals. Como próxima etapa para operação em larga escala, entrariam logs estruturados por turno sem PII, medição contínua de latência (`p50`/`p95`), consumo de tokens e taxa de bloqueio do guardrail exportados via OpenTelemetry para um coletor dedicado.
 - **Escala vetorial.** Guardar embeddings no SQLite funciona bem para poucos documentos e evita subir um serviço adicional. Para grandes volumes de texto, o mesmo contrato de busca migraria para um banco vetorial dedicado.
-- **Expansão dos evals em produção.** A suíte atual cobre 56 testes unitários e de API mais 18 cenários de eval calibrados com 14 rótulos humanos. Em operação real, novos traces rotulados por humanos alimentariam continuamente a taxonomia e comparariam diferentes modelos Gemini 4 em latência e custo.
+- **Expansão dos evals em produção.** A suíte atual cobre 57 testes unitários e de API mais 18 cenários de eval calibrados com 14 rótulos humanos. Em operação real, novos traces rotulados por humanos alimentariam continuamente a taxonomia e comparariam diferentes modelos Gemini 4 em latência e custo.
 - **Autenticação e rate limit distribuído.** O login usa hash `scrypt`, token assinado com HMAC e rate limit em memória para um processo único do Uvicorn. Em escala horizontal com múltiplas réplicas, entrariam verificação de e-mail, revogação de sessão e contadores compartilhados em Redis.
 - **Novos canais.** A interface web cobre o fluxo completo de cliente e gestor. Integrar WhatsApp ou Telegram exigiria apenas um novo adaptador sobre `ConversationService`, herdando automaticamente o gateway de verificação em 2 fatores (`order_id` + e-mail ou telefone) para sessões sem login.
 
