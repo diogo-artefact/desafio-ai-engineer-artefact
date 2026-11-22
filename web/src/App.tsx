@@ -1,6 +1,7 @@
 import { PanelLeft } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { AdminSettingsView } from "./components/AdminSettingsView";
 import { AuthScreen } from "./components/AuthScreen";
 import { ChatView, type ChatTurnError } from "./components/ChatView";
 import { MobileHeader } from "./components/MobileHeader";
@@ -14,8 +15,11 @@ import type {
   AuthUser,
   ChatMessage,
   ChatStreamEvent,
+  KnowledgeStatus,
+  ModelInfo,
   SessionSummary,
   StoreInfo,
+  ToolInfo,
 } from "./types/api";
 
 function formatArgsLine(args: Record<string, unknown>): string | null {
@@ -40,7 +44,13 @@ export function App() {
   const [activeView, setActiveView] = useState<AppView>("chat");
   const [serviceReady, setServiceReady] = useState<boolean>(true);
   const [storeInfo, setStoreInfo] = useState<StoreInfo | null>(null);
+
+  const [knowledge, setKnowledge] = useState<KnowledgeStatus | null>(null);
+  const [models, setModels] = useState<ModelInfo[]>([]);
+  const [activeModel, setActiveModel] = useState<string>("google:gemini-4-hydrogen");
+  const [tools, setTools] = useState<ToolInfo[]>([]);
   const [enabledTools, setEnabledTools] = useState<string[] | null>(null);
+  const [loadingAdmin, setLoadingAdmin] = useState(false);
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loadingSession, setLoadingSession] = useState(false);
@@ -76,6 +86,9 @@ export function App() {
     setMessages([]);
     setDraft("");
     setChatError(null);
+    setKnowledge(null);
+    setModels([]);
+    setTools([]);
     setEnabledTools(null);
     setActiveView("chat");
     setMobileMenuOpen(false);
@@ -115,7 +128,7 @@ export function App() {
   }, [token, handleLogout]);
 
   const refreshWorkspace = useCallback(
-    async (authToken: string) => {
+    async (authToken: string, currentUser: AuthUser) => {
       try {
         const [health, sessionList, store] = await Promise.all([
           api.health(),
@@ -125,6 +138,27 @@ export function App() {
         setServiceReady(health.ready);
         setSessions(sessionList);
         setStoreInfo(store);
+
+        if (currentUser.role === "admin") {
+          setLoadingAdmin(true);
+          try {
+            const [knowledgeStatus, modelsRes, toolsList] = await Promise.all([
+              api.getKnowledge(authToken),
+              api.listModels(authToken),
+              api.listTools(authToken),
+            ]);
+            setKnowledge(knowledgeStatus);
+            setServiceReady(knowledgeStatus.ready);
+            setModels(modelsRes.models);
+            setActiveModel(modelsRes.active_model);
+            setTools(toolsList);
+            setEnabledTools((prev) =>
+              prev === null ? toolsList.map((item) => item.tool_id) : prev,
+            );
+          } finally {
+            setLoadingAdmin(false);
+          }
+        }
       } catch (err) {
         if (err instanceof ApiError && err.status === 401) {
           handleLogout();
@@ -138,7 +172,7 @@ export function App() {
     if (!token || !user) {
       return;
     }
-    void refreshWorkspace(token);
+    void refreshWorkspace(token, user);
   }, [token, user, refreshWorkspace]);
 
   useEffect(() => {
@@ -240,6 +274,16 @@ export function App() {
       return;
     }
     setActiveView("settings");
+  }
+
+  function handleKnowledgeUpdated(nextKnowledge: KnowledgeStatus): void {
+    setKnowledge(nextKnowledge);
+    setServiceReady(nextKnowledge.ready);
+  }
+
+  function handleModelUpdated(nextActiveModel: string, nextModels: ModelInfo[]): void {
+    setActiveModel(nextActiveModel);
+    setModels(nextModels);
   }
 
   async function sendPrompt(rawText: string, replaceLastErrorBubble = false): Promise<void> {
@@ -543,16 +587,19 @@ export function App() {
         </div>
 
         {activeView === "settings" && user.role === "admin" ? (
-          <main className="flex min-h-0 flex-1 flex-col items-center overflow-y-auto px-6 py-12">
-            <div className="flex w-full max-w-[var(--container-chat)] flex-col gap-2">
-              <h1 className="m-0 text-[32px] font-medium leading-[110%] text-[var(--color-ink-primary)]">
-                Ajustes
-              </h1>
-              <p className="m-0 text-[16px] leading-[130%] text-[var(--color-ink-secondary)]">
-                Gerencie os arquivos da loja, o modelo Gemini 4 e as ferramentas do agente
-              </p>
-            </div>
-          </main>
+          <AdminSettingsView
+            token={token}
+            knowledge={knowledge}
+            models={models}
+            activeModel={activeModel}
+            tools={tools}
+            enabledTools={enabledTools ?? tools.map((item) => item.tool_id)}
+            loading={loadingAdmin}
+            onKnowledgeUpdated={handleKnowledgeUpdated}
+            onModelUpdated={handleModelUpdated}
+            onEnabledToolsChange={(nextTools) => setEnabledTools(nextTools)}
+            onUnauthorized={handleLogout}
+          />
         ) : (
           <ChatView
             user={user}
