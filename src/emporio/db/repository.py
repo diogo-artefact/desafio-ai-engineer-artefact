@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,7 @@ from google.genai import errors as genai_errors
 from sqlalchemy import Integer, cast, delete, exists, func, select
 from sqlalchemy.orm import Session
 
+from emporio.auth import AuthenticatedUser, UserRole
 from emporio.db.schema import (
     CategoryRow,
     CustomerRow,
@@ -23,6 +25,7 @@ from emporio.db.schema import (
     ProductRow,
     PromotionRow,
     SessionRow,
+    UserRow,
     create_db_engine,
     init_schema,
 )
@@ -440,9 +443,83 @@ class SQLiteStoreRepository:
         pdf = build("policy_pdf")
         return KnowledgeStatus(csvs=csvs, pdf=pdf, ready=csvs.loaded and pdf.loaded)
 
-    def list_sessions(self) -> list[dict[str, Any]]:
+    def _row_to_user(self, row: UserRow) -> AuthenticatedUser:
+        return AuthenticatedUser(
+            user_id=row.user_id,
+            name=row.name,
+            email=row.email,
+            role=row.role,
+        )
+
+    def get_user_by_id(self, user_id: str) -> AuthenticatedUser | None:
         with self._session() as session:
-            rows = session.scalars(select(SessionRow).order_by(SessionRow.updated_at.desc()))
+            row = session.get(UserRow, user_id)
+            return self._row_to_user(row) if row is not None else None
+
+    def get_user_with_hash_by_email(self, email: str) -> tuple[AuthenticatedUser, str] | None:
+        norm = email.strip().lower()
+        with self._session() as session:
+            row = session.scalar(select(UserRow).where(UserRow.email == norm))
+            if row is None:
+                return None
+            return self._row_to_user(row), row.password_hash
+
+    def create_user(
+        self,
+        name: str,
+        email: str,
+        password_hash: str,
+        role: UserRole = "customer",
+    ) -> AuthenticatedUser:
+        norm = email.strip().lower()
+        clean_name = name.strip() or norm.split("@")[0]
+        now = datetime.now(UTC).isoformat()
+        with self._session() as session:
+            existing = session.scalar(select(UserRow).where(UserRow.email == norm))
+            if existing is not None:
+                raise ValueError("Já existe uma conta cadastrada com este e-mail.")
+            row = UserRow(
+                user_id=uuid.uuid4().hex[:12],
+                name=clean_name,
+                email=norm,
+                password_hash=password_hash,
+                role=role,
+                created_at=now,
+            )
+            session.add(row)
+            session.commit()
+            return self._row_to_user(row)
+
+    def ensure_seed_user(
+        self,
+        name: str,
+        email: str,
+        password_hash: str,
+        role: UserRole,
+    ) -> None:
+        norm = email.strip().lower()
+        with self._session() as session:
+            existing = session.scalar(select(UserRow).where(UserRow.email == norm))
+            if existing is not None:
+                return
+            session.add(
+                UserRow(
+                    user_id=uuid.uuid4().hex[:12],
+                    name=name.strip(),
+                    email=norm,
+                    password_hash=password_hash,
+                    role=role,
+                    created_at=datetime.now(UTC).isoformat(),
+                )
+            )
+            session.commit()
+
+    def list_sessions(self, user_id: str | None = None) -> list[dict[str, Any]]:
+        with self._session() as session:
+            stmt = select(SessionRow).order_by(SessionRow.updated_at.desc())
+            if user_id is not None:
+                stmt = stmt.where(SessionRow.user_id == user_id)
+            rows = session.scalars(stmt)
             return [
                 {
                     "session_id": r.session_id,
@@ -453,11 +530,35 @@ class SQLiteStoreRepository:
                 for r in rows
             ]
 
-    def create_session(self, session_id: str, title: str) -> None:
+    def get_session(
+        self, session_id: str, user_id: str | None = None
+    ) -> dict[str, Any] | None:
+        with self._session() as session:
+            row = session.get(SessionRow, session_id)
+            if row is None:
+                return None
+            if user_id is not None and row.user_id != user_id:
+                return None
+            return {
+                "session_id": row.session_id,
+                "title": row.title,
+                "created_at": row.created_at,
+                "updated_at": row.updated_at,
+            }
+
+    def create_session(
+        self, session_id: str, title: str, user_id: str | None = None
+    ) -> None:
         now = datetime.now(UTC).isoformat()
         with self._session() as session:
             session.add(
-                SessionRow(session_id=session_id, title=title, created_at=now, updated_at=now)
+                SessionRow(
+                    session_id=session_id,
+                    user_id=user_id,
+                    title=title,
+                    created_at=now,
+                    updated_at=now,
+                )
             )
             session.commit()
 
@@ -511,7 +612,11 @@ class SQLiteStoreRepository:
                 parent.updated_at = now
             session.commit()
 
-    def delete_session(self, session_id: str) -> None:
+    def delete_session(self, session_id: str, user_id: str | None = None) -> bool:
         with self._session() as session:
-            session.execute(delete(SessionRow).where(SessionRow.session_id == session_id))
+            stmt = delete(SessionRow).where(SessionRow.session_id == session_id)
+            if user_id is not None:
+                stmt = stmt.where(SessionRow.user_id == user_id)
+            result = session.execute(stmt)
             session.commit()
+            return bool(result.rowcount)

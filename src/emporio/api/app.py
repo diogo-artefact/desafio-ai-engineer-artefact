@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import httpx
-from fastapi import FastAPI, File, HTTPException, Response, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from google.genai import errors as genai_errors
@@ -20,6 +20,13 @@ from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError, UnexpectedMode
 
 from emporio.agent import ALL_TOOL_IDS, TOOL_REGISTRY
 from emporio.api.container import AppContainer
+from emporio.auth import (
+    AuthenticatedUser,
+    hash_password,
+    issue_token,
+    verify_password,
+    verify_token,
+)
 from emporio.domain.rules import check_store_hours
 from emporio.etl.loader import REQUIRED_CSV_TABLES, ingest_policy_pdf, ingest_store_csvs
 
@@ -70,6 +77,17 @@ STORE_PROFILE: dict[str, Any] = {
         },
     ],
 }
+
+
+class LoginRequest(BaseModel):
+    email: str = Field(min_length=3)
+    password: str = Field(min_length=1)
+
+
+class RegisterRequest(BaseModel):
+    name: str = ""
+    email: str = Field(min_length=3)
+    password: str = Field(min_length=6)
 
 
 class CreateSessionRequest(BaseModel):
@@ -123,6 +141,39 @@ def _unpack_csv_uploads(raw_files: list[tuple[str, bytes]]) -> dict[str, bytes]:
     return extracted
 
 
+def _is_valid_email(email: str) -> bool:
+    clean = email.strip()
+    if "@" not in clean or " " in clean:
+        return False
+    local, domain = clean.split("@", 1)
+    return bool(local) and "." in domain and not domain.startswith(".") and not domain.endswith(".")
+
+
+def require_user(
+    request: Request,
+    authorization: Annotated[str | None, Header()] = None,
+) -> AuthenticatedUser:
+    deps: AppContainer = request.app.state.container
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Autenticação obrigatória.")
+    token = authorization.removeprefix("Bearer ").strip()
+    payload = verify_token(token, deps.settings.auth_secret)
+    if payload is None or not isinstance(payload.get("sub"), str):
+        raise HTTPException(status_code=401, detail="Sessão expirada ou inválida.")
+    user = deps.repo.get_user_by_id(payload["sub"])
+    if user is None:
+        raise HTTPException(status_code=401, detail="Conta não encontrada.")
+    return user
+
+
+def require_admin(
+    user: Annotated[AuthenticatedUser, Depends(require_user)],
+) -> AuthenticatedUser:
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Acesso restrito a gestores.")
+    return user
+
+
 def create_app(container: AppContainer | None = None) -> FastAPI:
     deps = container or AppContainer.from_settings()
     api = FastAPI(title="Empório da Música API", version="0.1.0")
@@ -135,14 +186,41 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
     )
     api.state.container = deps
 
+    @api.post("/api/auth/login")
+    def login(body: LoginRequest) -> dict[str, Any]:
+        found = deps.repo.get_user_with_hash_by_email(body.email)
+        if found is None:
+            raise HTTPException(status_code=401, detail="E-mail ou senha inválidos.")
+        user, password_hash = found
+        if not verify_password(body.password, password_hash):
+            raise HTTPException(status_code=401, detail="E-mail ou senha inválidos.")
+        token = issue_token(user, deps.settings.auth_secret)
+        return {"token": token, "user": user.model_dump()}
+
+    @api.post("/api/auth/register", status_code=201)
+    def register(body: RegisterRequest) -> dict[str, Any]:
+        if not _is_valid_email(body.email):
+            raise HTTPException(status_code=400, detail="Informe um e-mail válido.")
+        try:
+            user = deps.repo.create_user(
+                name=body.name,
+                email=body.email,
+                password_hash=hash_password(body.password),
+                role="customer",
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        token = issue_token(user, deps.settings.auth_secret)
+        return {"token": token, "user": user.model_dump()}
+
+    @api.get("/api/auth/me")
+    def me(user: Annotated[AuthenticatedUser, Depends(require_user)]) -> dict[str, Any]:
+        return {"user": user.model_dump()}
+
     @api.get("/api/health")
     def health() -> dict[str, Any]:
         knowledge = deps.repo.get_knowledge_status()
-        return {
-            "status": "ok",
-            "ready": knowledge.ready,
-            "knowledge": knowledge.model_dump(),
-        }
+        return {"status": "ok", "ready": knowledge.ready}
 
     @api.get("/api/store")
     def store_info() -> dict[str, Any]:
@@ -152,7 +230,9 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
         }
 
     @api.get("/api/knowledge")
-    def knowledge_status() -> dict[str, Any]:
+    def knowledge_status(
+        _admin: Annotated[AuthenticatedUser, Depends(require_admin)],
+    ) -> dict[str, Any]:
         status = deps.repo.get_knowledge_status()
         return {
             **status.model_dump(),
@@ -160,7 +240,10 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
         }
 
     @api.post("/api/knowledge/csvs")
-    async def upload_csvs(files: Annotated[list[UploadFile], File()]) -> dict[str, Any]:
+    async def upload_csvs(
+        files: Annotated[list[UploadFile], File()],
+        _admin: Annotated[AuthenticatedUser, Depends(require_admin)],
+    ) -> dict[str, Any]:
         raw_uploads: list[tuple[str, bytes]] = []
         for upload in files:
             name = upload.filename or ""
@@ -182,7 +265,10 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
         }
 
     @api.post("/api/knowledge/pdf")
-    async def upload_pdf(file: Annotated[UploadFile, File()]) -> dict[str, Any]:
+    async def upload_pdf(
+        file: Annotated[UploadFile, File()],
+        _admin: Annotated[AuthenticatedUser, Depends(require_admin)],
+    ) -> dict[str, Any]:
         filename = file.filename or "políticas_da_loja.pdf"
         if not filename.lower().endswith(".pdf"):
             raise HTTPException(status_code=400, detail="Envie um arquivo no formato PDF.")
@@ -207,22 +293,30 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
         }
 
     @api.get("/api/sessions")
-    def list_sessions() -> dict[str, Any]:
-        return {"sessions": deps.repo.list_sessions()}
+    def list_sessions(
+        user: Annotated[AuthenticatedUser, Depends(require_user)],
+    ) -> dict[str, Any]:
+        return {"sessions": deps.repo.list_sessions(user_id=user.user_id)}
 
     @api.post("/api/sessions", status_code=201)
-    def create_session(body: CreateSessionRequest | None = None) -> dict[str, Any]:
+    def create_session(
+        user: Annotated[AuthenticatedUser, Depends(require_user)],
+        body: CreateSessionRequest | None = None,
+    ) -> dict[str, Any]:
         session_id = uuid.uuid4().hex[:12]
-        title = (body.title.strip() if body and body.title.strip() else "Nova conversa")
-        deps.repo.create_session(session_id, title)
-        sessions = deps.repo.list_sessions()
-        created = next(s for s in sessions if s["session_id"] == session_id)
+        title = body.title.strip() if body and body.title.strip() else "Nova conversa"
+        deps.repo.create_session(session_id, title, user_id=user.user_id)
+        created = deps.repo.get_session(session_id, user_id=user.user_id)
+        if created is None:
+            raise HTTPException(status_code=500, detail="Erro ao criar conversa.")
         return created
 
     @api.get("/api/sessions/{session_id}")
-    def get_session(session_id: str) -> dict[str, Any]:
-        sessions = deps.repo.list_sessions()
-        match = next((s for s in sessions if s["session_id"] == session_id), None)
+    def get_session(
+        session_id: str,
+        user: Annotated[AuthenticatedUser, Depends(require_user)],
+    ) -> dict[str, Any]:
+        match = deps.repo.get_session(session_id, user_id=user.user_id)
         if match is None:
             raise HTTPException(status_code=404, detail="Conversa não encontrada.")
         return {
@@ -231,12 +325,17 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
         }
 
     @api.delete("/api/sessions/{session_id}", status_code=204)
-    def delete_session(session_id: str) -> Response:
-        deps.repo.delete_session(session_id)
+    def delete_session(
+        session_id: str,
+        user: Annotated[AuthenticatedUser, Depends(require_user)],
+    ) -> Response:
+        deps.repo.delete_session(session_id, user_id=user.user_id)
         return Response(status_code=204)
 
     @api.get("/api/tools")
-    def list_tools() -> dict[str, Any]:
+    def list_tools(
+        _admin: Annotated[AuthenticatedUser, Depends(require_admin)],
+    ) -> dict[str, Any]:
         return {
             "tools": [
                 {
@@ -249,12 +348,20 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
         }
 
     @api.post("/api/chat")
-    async def chat_stream(body: ChatRequest) -> StreamingResponse:
+    async def chat_stream(
+        body: ChatRequest,
+        user: Annotated[AuthenticatedUser, Depends(require_user)],
+    ) -> StreamingResponse:
         clean_message = body.message.strip()
         if not clean_message:
             raise HTTPException(status_code=422, detail="A mensagem não pode estar vazia.")
 
         if body.enabled_tools is not None:
+            if user.role != "admin":
+                raise HTTPException(
+                    status_code=403,
+                    detail="Apenas gestores podem alterar ferramentas ativas.",
+                )
             unknown = sorted(set(body.enabled_tools) - ALL_TOOL_IDS)
             if unknown:
                 raise HTTPException(
@@ -265,7 +372,20 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
         else:
             enabled = ALL_TOOL_IDS
 
-        session_id = (body.session_id or "").strip() or uuid.uuid4().hex[:12]
+        if user.role == "customer" and not deps.repo.get_knowledge_status().ready:
+            raise HTTPException(
+                status_code=503,
+                detail="Nosso atendimento virtual não está disponível no momento.",
+            )
+
+        requested_sid = (body.session_id or "").strip()
+        if requested_sid:
+            existing = deps.repo.get_session(requested_sid)
+            if existing is not None and deps.repo.get_session(requested_sid, user.user_id) is None:
+                raise HTTPException(status_code=404, detail="Conversa não encontrada.")
+            session_id = requested_sid
+        else:
+            session_id = uuid.uuid4().hex[:12]
 
         async def event_generator() -> AsyncIterator[str]:
             yield _sse_line({"type": "session", "session_id": session_id})
@@ -274,6 +394,7 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
                     session_id=session_id,
                     message=clean_message,
                     enabled_tools=enabled,
+                    user_id=user.user_id,
                 ):
                     yield _sse_line(event.model_dump())
             except (

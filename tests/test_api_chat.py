@@ -37,6 +37,12 @@ def _parse_sse(raw_text: str) -> list[dict]:
     return events
 
 
+def _auth_headers(client: TestClient, email: str, password: str) -> dict[str, str]:
+    res = client.post("/api/auth/login", json={"email": email, "password": password})
+    assert res.status_code == 200
+    return {"Authorization": f"Bearer {res.json()['token']}"}
+
+
 def test_list_tools_and_chat_sse_stream_persists_turn(tmp_path: Path) -> None:
     db_path = tmp_path / "chat.db"
     embedder = _StubEmbedder()
@@ -63,14 +69,20 @@ def test_list_tools_and_chat_sse_stream_persists_turn(tmp_path: Path) -> None:
         model=FunctionModel(stream_function=fake_stream),
     )
     client = TestClient(create_app(container))
+    admin_headers = _auth_headers(client, "admin@admin.com", "admin123")
+    user_headers = _auth_headers(client, "user@user.com", "user123")
 
-    tools_res = client.get("/api/tools")
+    tools_res = client.get("/api/tools", headers=admin_headers)
     assert tools_res.status_code == 200
     tool_ids = [t["tool_id"] for t in tools_res.json()["tools"]]
     assert len(tool_ids) == 5
     assert "lookup_order" in tool_ids
 
-    res = client.post("/api/chat", json={"message": "Quanto custa o Takamine GD20?"})
+    res = client.post(
+        "/api/chat",
+        headers=user_headers,
+        json={"message": "Quanto custa o Takamine GD20?"},
+    )
     assert res.status_code == 200
     assert res.headers["content-type"].startswith("text/event-stream")
 
@@ -84,7 +96,7 @@ def test_list_tools_and_chat_sse_stream_persists_turn(tmp_path: Path) -> None:
     assert event_types[-1] == "done"
 
     session_id = events[0]["session_id"]
-    session_res = client.get(f"/api/sessions/{session_id}")
+    session_res = client.get(f"/api/sessions/{session_id}", headers=user_headers)
     assert session_res.status_code == 200
     messages = session_res.json()["messages"]
     assert [m["role"] for m in messages] == ["user", "assistant"]
@@ -110,17 +122,19 @@ def test_chat_rejects_unknown_tools_and_streams_upstream_503_as_error_event(
         model=FunctionModel(stream_function=failing_stream),
     )
     client = TestClient(create_app(container))
+    admin_headers = _auth_headers(client, "admin@admin.com", "admin123")
 
     bad_tool = client.post(
         "/api/chat",
+        headers=admin_headers,
         json={"message": "Oi", "enabled_tools": ["nonexistent_tool"]},
     )
     assert bad_tool.status_code == 400
 
-    blank = client.post("/api/chat", json={"message": "   "})
+    blank = client.post("/api/chat", headers=admin_headers, json={"message": "   "})
     assert blank.status_code == 422
 
-    res = client.post("/api/chat", json={"message": "Violões até 1000"})
+    res = client.post("/api/chat", headers=admin_headers, json={"message": "Violões até 1000"})
     assert res.status_code == 200
     events = _parse_sse(res.text)
     assert events[-1]["type"] == "error"

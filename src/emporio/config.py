@@ -20,6 +20,11 @@ class Settings(BaseSettings):
     api_host: str = "127.0.0.1"
     api_port: int = 8000
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    auth_secret: str = "dev-emporio-change-me-in-prod"
+    seed_admin_email: str = "admin@admin.com"
+    seed_admin_password: str = "admin123"
+    seed_user_email: str = "user@user.com"
+    seed_user_password: str = "user123"
 
     @property
     def cors_origins_list(self) -> list[str]:

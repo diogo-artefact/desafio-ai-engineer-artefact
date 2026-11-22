@@ -351,10 +351,17 @@ class ConversationService:
         self._knowledge = knowledge
         self._sessions = sessions
 
-    def _ensure_session(self, session_id: str, first_message: str) -> list[dict[str, Any]]:
-        existing = {s["session_id"] for s in self._sessions.list_sessions()}
-        if session_id not in existing:
-            self._sessions.create_session(session_id, _session_title_from(first_message))
+    def _ensure_session(
+        self,
+        session_id: str,
+        first_message: str,
+        user_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        existing = self._sessions.get_session(session_id, user_id=user_id)
+        if existing is None:
+            self._sessions.create_session(
+                session_id, _session_title_from(first_message), user_id=user_id
+            )
             return []
         history = self._sessions.get_messages(session_id)
         if not history:
@@ -366,8 +373,9 @@ class ConversationService:
         session_id: str,
         message: str,
         enabled_tools: frozenset[str] | None = None,
+        user_id: str | None = None,
     ) -> AsyncIterator[AgentEvent]:
-        history = self._ensure_session(session_id, message)
+        history = self._ensure_session(session_id, message, user_id=user_id)
         self._sessions.append_message(session_id, "user", message)
 
         deps = AgentDeps(
@@ -389,9 +397,15 @@ class ConversationService:
         session_id: str,
         message: str,
         enabled_tools: frozenset[str] | None = None,
+        user_id: str | None = None,
     ) -> TurnDoneEvent:
         done: TurnDoneEvent | None = None
-        async for event in self.stream_message(session_id, message, enabled_tools=enabled_tools):
+        async for event in self.stream_message(
+            session_id,
+            message,
+            enabled_tools=enabled_tools,
+            user_id=user_id,
+        ):
             if isinstance(event, TurnDoneEvent):
                 done = event
         return done or TurnDoneEvent(text="", trace=[])

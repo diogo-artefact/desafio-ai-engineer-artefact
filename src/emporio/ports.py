@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+from emporio.auth import AuthenticatedUser, UserRole
 from emporio.domain.models import (
     KnowledgeStatus,
     OrderInfo,
@@ -44,10 +45,40 @@ class KnowledgeRepository(Protocol):
     def get_knowledge_status(self) -> KnowledgeStatus: ...
 
 
-class SessionRepository(Protocol):
-    def list_sessions(self) -> list[dict[str, Any]]: ...
+class UserRepository(Protocol):
+    def get_user_by_id(self, user_id: str) -> AuthenticatedUser | None: ...
 
-    def create_session(self, session_id: str, title: str) -> None: ...
+    def get_user_with_hash_by_email(
+        self, email: str
+    ) -> tuple[AuthenticatedUser, str] | None: ...
+
+    def create_user(
+        self,
+        name: str,
+        email: str,
+        password_hash: str,
+        role: UserRole = "customer",
+    ) -> AuthenticatedUser: ...
+
+    def ensure_seed_user(
+        self,
+        name: str,
+        email: str,
+        password_hash: str,
+        role: UserRole,
+    ) -> None: ...
+
+
+class SessionRepository(Protocol):
+    def list_sessions(self, user_id: str | None = None) -> list[dict[str, Any]]: ...
+
+    def get_session(
+        self, session_id: str, user_id: str | None = None
+    ) -> dict[str, Any] | None: ...
+
+    def create_session(
+        self, session_id: str, title: str, user_id: str | None = None
+    ) -> None: ...
 
     def update_session_title(self, session_id: str, title: str) -> None: ...
 
@@ -61,4 +92,4 @@ class SessionRepository(Protocol):
         trace: list[dict[str, Any]] | None = None,
     ) -> None: ...
 
-    def delete_session(self, session_id: str) -> None: ...
+    def delete_session(self, session_id: str, user_id: str | None = None) -> bool: ...
