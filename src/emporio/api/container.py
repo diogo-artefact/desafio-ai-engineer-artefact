@@ -93,6 +93,7 @@ class AppContainer:
             memory_repo=repo,
             personalization_repo=repo,
             drafts=repo,
+            telemetry_repo=repo,
             compactor=compactor,
             memory_extractor=memory_extractor,
         )

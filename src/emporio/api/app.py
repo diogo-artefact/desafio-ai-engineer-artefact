@@ -28,6 +28,7 @@ from emporio.agent import (
     validate_custom_instructions_rules,
 )
 from emporio.api.container import AppContainer
+from emporio.api.rate_limit import SlidingWindowRateLimiter
 from emporio.auth import (
     AuthenticatedUser,
     hash_password,
@@ -37,6 +38,7 @@ from emporio.auth import (
 )
 from emporio.domain.rules import check_store_hours
 from emporio.etl.loader import REQUIRED_CSV_TABLES, ingest_policy_pdf, ingest_store_csvs
+from emporio.observability import configure_telemetry_logging
 
 STORE_PROFILE: dict[str, Any] = {
     "name": "Empório da Música",
@@ -139,8 +141,24 @@ def _filter_event_for_role(payload: dict[str, Any], role: str) -> dict[str, Any]
     ):
         return None
     if payload.get("type") == "done" and isinstance(payload.get("trace"), list):
-        return {**payload, "trace": _filter_trace_for_role(payload["trace"], role)}
+        filtered = {
+            k: v
+            for k, v in payload.items()
+            if k not in ("input_tokens", "output_tokens")
+        }
+        return {**filtered, "trace": _filter_trace_for_role(payload["trace"], role)}
     return payload
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for", "").strip()
+    if forwarded:
+        first = forwarded.split(",")[0].strip()
+        if first:
+            return first
+    if request.client is not None and request.client.host:
+        return request.client.host
+    return "unknown"
 
 
 def _error_event_from(exc: Exception) -> dict[str, Any]:
@@ -211,6 +229,7 @@ def require_admin(
 
 
 def create_app(container: AppContainer | None = None) -> FastAPI:
+    configure_telemetry_logging()
     deps = container or AppContainer.from_settings()
 
     @asynccontextmanager
@@ -242,9 +261,25 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
         allow_headers=["*"],
     )
     api.state.container = deps
+    rate_limiter = SlidingWindowRateLimiter()
+    api.state.rate_limiter = rate_limiter
+
+    def _enforce_rate_limit(key: str, limit: int, message: str) -> None:
+        allowed, retry_after = rate_limiter.check(key, limit, window_seconds=60)
+        if not allowed:
+            raise HTTPException(
+                status_code=429,
+                detail=message,
+                headers={"Retry-After": str(retry_after)},
+            )
 
     @api.post("/api/auth/login")
-    def login(body: LoginRequest) -> dict[str, Any]:
+    def login(body: LoginRequest, request: Request) -> dict[str, Any]:
+        _enforce_rate_limit(
+            f"auth:{_client_ip(request)}",
+            deps.settings.rate_limit_auth_per_minute,
+            "Muitas tentativas de autenticação. Aguarde um minuto e tente novamente.",
+        )
         found = deps.repo.get_user_with_hash_by_email(body.email)
         if found is None:
             raise HTTPException(status_code=401, detail="E-mail ou senha inválidos.")
@@ -255,7 +290,12 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
         return {"token": token, "user": user.model_dump()}
 
     @api.post("/api/auth/register", status_code=201)
-    def register(body: RegisterRequest) -> dict[str, Any]:
+    def register(body: RegisterRequest, request: Request) -> dict[str, Any]:
+        _enforce_rate_limit(
+            f"auth:{_client_ip(request)}",
+            deps.settings.rate_limit_auth_per_minute,
+            "Muitas tentativas de cadastro. Aguarde um minuto e tente novamente.",
+        )
         if not _is_valid_email(body.email):
             raise HTTPException(status_code=400, detail="Informe um e-mail válido.")
         try:
@@ -550,11 +590,22 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
         deps.repo.set_setting("active_model", chosen)
         return _models_payload()
 
+    @api.get("/api/metrics")
+    def get_metrics(
+        _admin: Annotated[AuthenticatedUser, Depends(require_admin)],
+    ) -> dict[str, Any]:
+        return deps.repo.get_metrics_summary().model_dump()
+
     @api.post("/api/chat")
     async def chat_stream(
         body: ChatRequest,
         user: Annotated[AuthenticatedUser, Depends(require_user)],
     ) -> StreamingResponse:
+        _enforce_rate_limit(
+            f"chat:{user.user_id}",
+            deps.settings.rate_limit_chat_per_minute,
+            "Limite de mensagens por minuto atingido. Aguarde alguns segundos e tente novamente.",
+        )
         clean_message = body.message.strip()
         if not clean_message:
             raise HTTPException(status_code=422, detail="A mensagem não pode estar vazia.")

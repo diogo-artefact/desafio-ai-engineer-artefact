@@ -5,7 +5,7 @@ import json
 import os
 import time
 from collections.abc import AsyncIterator
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from pydantic_ai import Agent
@@ -51,7 +51,8 @@ from emporio.agent.tools import (
 )
 from emporio.auth import UserRole
 from emporio.config import get_settings
-from emporio.domain.models import UserMemory
+from emporio.domain.models import TurnOutcome, TurnTelemetry, UserMemory
+from emporio.observability import log_turn_event
 from emporio.ports import (
     CatalogRepository,
     CompactionRepository,
@@ -65,6 +66,7 @@ from emporio.ports import (
     PolicyRetriever,
     SessionRepository,
     SettingsRepository,
+    TelemetryRepository,
     TitleGenerator,
     UserMemoryExtractor,
 )
@@ -296,6 +298,12 @@ class SupportAgent:
     def allows_runtime_model_override(self) -> bool:
         return isinstance(self._model, str)
 
+    @property
+    def model_name(self) -> str:
+        if isinstance(self._model, str):
+            return self._model
+        return str(getattr(self._model, "model_name", type(self._model).__name__))
+
     async def stream_turn(
         self,
         message: str,
@@ -465,7 +473,15 @@ class SupportAgent:
         final_text = "".join(full_text_parts).strip()
         if not final_text and run.result is not None and isinstance(run.result.output, str):
             final_text = run.result.output.strip()
-        yield TurnDoneEvent(text=final_text, trace=trace)
+        usage = run.usage
+        input_tokens = int(getattr(usage, "input_tokens", 0) or 0) if usage is not None else 0
+        output_tokens = int(getattr(usage, "output_tokens", 0) or 0) if usage is not None else 0
+        yield TurnDoneEvent(
+            text=final_text,
+            trace=trace,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
 
     async def reply(
         self,
@@ -504,6 +520,7 @@ class ConversationService:
         memory_repo: MemoryRepository | None = None,
         personalization_repo: PersonalizationRepository | None = None,
         drafts: OrderDraftRepository | None = None,
+        telemetry_repo: TelemetryRepository | None = None,
         compactor: ConversationCompactor | None = None,
         memory_extractor: UserMemoryExtractor | None = None,
         compaction_trigger_messages: int = 12,
@@ -526,6 +543,7 @@ class ConversationService:
         self._memory_repo = memory_repo
         self._personalization_repo = personalization_repo
         self._drafts = drafts
+        self._telemetry_repo = telemetry_repo
         self._compactor = compactor
         self._memory_extractor = memory_extractor
         self._compaction_trigger_messages = compaction_trigger_messages
@@ -674,6 +692,39 @@ class ConversationService:
             self._sessions.update_session_title(session_id, _session_title_from(first_message))
         return history
 
+    def _record_telemetry(
+        self,
+        *,
+        model: str,
+        user_role: str,
+        outcome: TurnOutcome,
+        guardrail_action: str,
+        guardrail_ms: int,
+        started_at: float,
+        tools_called: list[str],
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+    ) -> None:
+        entry = TurnTelemetry(
+            model=model,
+            user_role=user_role,
+            outcome=outcome,
+            guardrail_action=guardrail_action,
+            guardrail_ms=guardrail_ms,
+            total_ms=max(0, int((time.perf_counter() - started_at) * 1000)),
+            tool_count=len(tools_called),
+            tools_called=tools_called,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            created_at=datetime.now(UTC).isoformat(),
+        )
+        log_turn_event(entry)
+        if self._telemetry_repo is not None:
+            try:
+                self._telemetry_repo.record_turn_telemetry(entry)
+            except Exception:
+                pass
+
     async def stream_message(
         self,
         session_id: str,
@@ -685,6 +736,14 @@ class ConversationService:
         user_email: str | None = None,
         reference_time: datetime | None = None,
     ) -> AsyncIterator[AgentEvent]:
+        turn_started_at = time.perf_counter()
+        guardrail_action = "none"
+        guardrail_ms = 0
+        resolved_model_name = (
+            self.resolve_active_model()
+            if self._agent.allows_runtime_model_override
+            else self._agent.model_name
+        )
         history = self._ensure_session(session_id, message, user_id=user_id)
         self._sessions.append_message(session_id, "user", message)
 
@@ -734,6 +793,8 @@ class ConversationService:
                     args={},
                 )
                 decision = await self._guardrail.check(message, history)
+                guardrail_action = decision.action
+                guardrail_ms = decision.latency_ms
                 guardrail_args: dict[str, Any] = {
                     "intent": decision.intent,
                     "probability": decision.intent_probability,
@@ -761,6 +822,15 @@ class ConversationService:
                         "assistant",
                         decision.reply,
                         trace=[guardrail_trace],
+                    )
+                    self._record_telemetry(
+                        model=decision.model or "jev-latest",
+                        user_role=user_role,
+                        outcome="guardrail_blocked",
+                        guardrail_action=guardrail_action,
+                        guardrail_ms=guardrail_ms,
+                        started_at=turn_started_at,
+                        tools_called=[],
                     )
                     yield TurnDoneEvent(text=decision.reply, trace=[guardrail_trace])
                     title_event = await _finalize_pending_title()
@@ -794,7 +864,7 @@ class ConversationService:
                 drafts=self._drafts,
             )
             model_override = (
-                self.resolve_active_model() if self._agent.allows_runtime_model_override else None
+                resolved_model_name if self._agent.allows_runtime_model_override else None
             )
             async for event in self._agent.stream_turn(
                 message,
@@ -809,13 +879,34 @@ class ConversationService:
                         if guardrail_trace is not None
                         else event.trace
                     )
+                    tools_called = [
+                        str(step["tool_name"])
+                        for step in event.trace
+                        if step.get("type") == "tool" and step.get("tool_name")
+                    ]
                     self._sessions.append_message(
                         session_id, "assistant", event.text, trace=full_trace
+                    )
+                    self._record_telemetry(
+                        model=resolved_model_name,
+                        user_role=user_role,
+                        outcome="ok",
+                        guardrail_action=guardrail_action,
+                        guardrail_ms=guardrail_ms,
+                        started_at=turn_started_at,
+                        tools_called=tools_called,
+                        input_tokens=event.input_tokens,
+                        output_tokens=event.output_tokens,
                     )
                     ready_title = _consume_ready_title()
                     if ready_title is not None:
                         yield ready_title
-                    yield TurnDoneEvent(text=event.text, trace=full_trace)
+                    yield TurnDoneEvent(
+                        text=event.text,
+                        trace=full_trace,
+                        input_tokens=event.input_tokens,
+                        output_tokens=event.output_tokens,
+                    )
                     memory_task = asyncio.create_task(
                         self._persist_user_memories(
                             user_id, message, event.text, user_memories
@@ -830,6 +921,17 @@ class ConversationService:
                 ready_title = _consume_ready_title()
                 if ready_title is not None:
                     yield ready_title
+        except Exception:
+            self._record_telemetry(
+                model=resolved_model_name,
+                user_role=user_role,
+                outcome="error",
+                guardrail_action=guardrail_action,
+                guardrail_ms=guardrail_ms,
+                started_at=turn_started_at,
+                tools_called=[],
+            )
+            raise
         finally:
             if title_task is not None and not title_task.done():
                 title_task.cancel()

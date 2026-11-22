@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     seed_user_email: str = "user@user.com"
     seed_user_password: str = "user123"
     order_auto_delivery_seconds: int = 300
+    rate_limit_chat_per_minute: int = 20
+    rate_limit_auth_per_minute: int = 15
 
     @property
     def cors_origins_list(self) -> list[str]:

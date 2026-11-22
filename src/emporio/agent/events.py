@@ -159,6 +159,8 @@ class TurnDoneEvent(BaseModel):
     type: Literal["done"] = "done"
     text: str
     trace: list[dict[str, Any]]
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 AgentEvent = (

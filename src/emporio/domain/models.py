@@ -9,6 +9,7 @@ RetrievalMode = Literal["vector", "keyword"]
 KnowledgeSourceKey = Literal["store_csvs", "policy_pdf"]
 GuardrailAction = Literal["allow", "block_adversarial", "block_accessories", "block_off_topic"]
 OrderDraftStatus = Literal["pending", "confirmed", "cancelled", "delivered"]
+TurnOutcome = Literal["ok", "guardrail_blocked", "error"]
 
 
 class PromotionInfo(BaseModel):
@@ -238,3 +239,47 @@ class OrderDraft(BaseModel):
     confirmed_at: str | None = None
     deliver_at: str | None = None
     delivered_at: str | None = None
+
+
+class TurnTelemetry(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    model: str
+    user_role: str
+    outcome: TurnOutcome
+    guardrail_action: str
+    guardrail_ms: int
+    total_ms: int
+    tool_count: int
+    tools_called: list[str]
+    input_tokens: int
+    output_tokens: int
+    created_at: str
+
+
+class ModelUsageBreakdown(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    model: str
+    turns: int
+    input_tokens: int
+    output_tokens: int
+    avg_latency_ms: int
+
+
+class MetricsSummary(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    total_turns: int
+    ok_turns: int
+    guardrail_blocks: int
+    guardrail_block_rate: float
+    error_turns: int
+    p50_latency_ms: int
+    p95_latency_ms: int
+    avg_guardrail_ms: int
+    total_input_tokens: int
+    total_output_tokens: int
+    by_model: list[ModelUsageBreakdown]
+    by_guardrail_action: dict[str, int]
+    recent_turns: list[TurnTelemetry]
