@@ -31,7 +31,6 @@ from emporio.db.schema import (
     PromotionRow,
     SessionRow,
     SessionSummaryRow,
-    TurnTelemetryRow,
     UserMemoryRow,
     UserPreferenceRow,
     UserRow,
@@ -41,8 +40,6 @@ from emporio.db.schema import (
 from emporio.domain.models import (
     KnowledgeSourceStatus,
     KnowledgeStatus,
-    MetricsSummary,
-    ModelUsageBreakdown,
     OrderDraft,
     OrderInfo,
     OrderItemInfo,
@@ -51,14 +48,12 @@ from emporio.domain.models import (
     ProductSummary,
     PromotionInfo,
     SessionCompaction,
-    TurnTelemetry,
     UserMemory,
     UserPersonalization,
 )
 from emporio.domain.rules import STORE_TZ
 from emporio.domain.text import normalize_phone_digits, normalize_text
 from emporio.etl.embeddings import Embedder, cosine_similarity
-from emporio.observability import percentile_ms
 
 logger = logging.getLogger(__name__)
 
@@ -1197,97 +1192,3 @@ class SQLiteStoreRepository:
 
             session.commit()
         return delivered
-
-    def record_turn_telemetry(self, entry: TurnTelemetry) -> None:
-        with self._session() as session:
-            session.add(
-                TurnTelemetryRow(
-                    model=entry.model,
-                    user_role=entry.user_role,
-                    outcome=entry.outcome,
-                    guardrail_action=entry.guardrail_action,
-                    guardrail_ms=entry.guardrail_ms,
-                    total_ms=entry.total_ms,
-                    tool_count=entry.tool_count,
-                    tools_called_json=json.dumps(entry.tools_called, ensure_ascii=False),
-                    input_tokens=entry.input_tokens,
-                    output_tokens=entry.output_tokens,
-                    created_at=entry.created_at,
-                )
-            )
-            session.commit()
-
-    def get_metrics_summary(self, recent_limit: int = 20) -> MetricsSummary:
-        with self._session() as session:
-            rows = list(
-                session.scalars(select(TurnTelemetryRow).order_by(TurnTelemetryRow.id.asc()))
-            )
-
-        total_turns = len(rows)
-        ok_turns = sum(1 for row in rows if row.outcome == "ok")
-        guardrail_blocks = sum(1 for row in rows if row.outcome == "guardrail_blocked")
-        error_turns = sum(1 for row in rows if row.outcome == "error")
-        block_rate = round(guardrail_blocks / total_turns, 4) if total_turns else 0.0
-
-        latencies = [row.total_ms for row in rows]
-        guardrail_latencies = [
-            row.guardrail_ms
-            for row in rows
-            if row.guardrail_action and row.guardrail_action != "none"
-        ]
-        avg_guardrail_ms = (
-            round(sum(guardrail_latencies) / len(guardrail_latencies))
-            if guardrail_latencies
-            else 0
-        )
-
-        by_model_acc: dict[str, list[TurnTelemetryRow]] = {}
-        by_action: dict[str, int] = {}
-        for row in rows:
-            by_model_acc.setdefault(row.model, []).append(row)
-            by_action[row.guardrail_action] = by_action.get(row.guardrail_action, 0) + 1
-
-        by_model = [
-            ModelUsageBreakdown(
-                model=model_name,
-                turns=len(group),
-                input_tokens=sum(item.input_tokens for item in group),
-                output_tokens=sum(item.output_tokens for item in group),
-                avg_latency_ms=round(sum(item.total_ms for item in group) / len(group)),
-            )
-            for model_name, group in sorted(by_model_acc.items())
-        ]
-
-        recent_rows = list(reversed(rows[-max(1, recent_limit) :])) if rows else []
-        recent_turns = [
-            TurnTelemetry(
-                model=row.model,
-                user_role=row.user_role,
-                outcome=row.outcome,
-                guardrail_action=row.guardrail_action,
-                guardrail_ms=row.guardrail_ms,
-                total_ms=row.total_ms,
-                tool_count=row.tool_count,
-                tools_called=json.loads(row.tools_called_json) if row.tools_called_json else [],
-                input_tokens=row.input_tokens,
-                output_tokens=row.output_tokens,
-                created_at=row.created_at,
-            )
-            for row in recent_rows
-        ]
-
-        return MetricsSummary(
-            total_turns=total_turns,
-            ok_turns=ok_turns,
-            guardrail_blocks=guardrail_blocks,
-            guardrail_block_rate=block_rate,
-            error_turns=error_turns,
-            p50_latency_ms=percentile_ms(latencies, 50.0),
-            p95_latency_ms=percentile_ms(latencies, 95.0),
-            avg_guardrail_ms=avg_guardrail_ms,
-            total_input_tokens=sum(row.input_tokens for row in rows),
-            total_output_tokens=sum(row.output_tokens for row in rows),
-            by_model=by_model,
-            by_guardrail_action=by_action,
-            recent_turns=recent_turns,
-        )

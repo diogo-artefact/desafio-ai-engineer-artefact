@@ -9,14 +9,12 @@ from emporio.domain.models import (
     GuardrailDecision,
     InstructionValidationResult,
     KnowledgeStatus,
-    MetricsSummary,
     OrderDraft,
     OrderInfo,
     PolicyChunkHit,
     ProductDetail,
     ProductSummary,
     SessionCompaction,
-    TurnTelemetry,
     UserMemory,
     UserPersonalization,
 )
@@ -227,9 +225,3 @@ class SessionRepository(Protocol):
     ) -> None: ...
 
     def delete_session(self, session_id: str, user_id: str | None = None) -> bool: ...
-
-
-class TelemetryRepository(Protocol):
-    def record_turn_telemetry(self, entry: TurnTelemetry) -> None: ...
-
-    def get_metrics_summary(self, recent_limit: int = 20) -> MetricsSummary: ...

@@ -266,23 +266,6 @@ class OrderDraftRow(Base):
     delivered_at: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
-class TurnTelemetryRow(Base):
-    __tablename__ = "turn_telemetry"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    model: Mapped[str] = mapped_column(String(80), nullable=False)
-    user_role: Mapped[str] = mapped_column(String(16), nullable=False)
-    outcome: Mapped[str] = mapped_column(String(24), nullable=False, index=True)
-    guardrail_action: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
-    guardrail_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    total_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    tool_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    tools_called_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
-    input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    created_at: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-
-
 def create_db_engine(db_path: Path | str) -> Engine:
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)

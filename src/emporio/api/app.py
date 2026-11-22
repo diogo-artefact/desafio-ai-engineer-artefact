@@ -38,7 +38,6 @@ from emporio.auth import (
 )
 from emporio.domain.rules import check_store_hours
 from emporio.etl.loader import REQUIRED_CSV_TABLES, ingest_policy_pdf, ingest_store_csvs
-from emporio.observability import configure_telemetry_logging
 
 STORE_PROFILE: dict[str, Any] = {
     "name": "Empório da Música",
@@ -141,12 +140,7 @@ def _filter_event_for_role(payload: dict[str, Any], role: str) -> dict[str, Any]
     ):
         return None
     if payload.get("type") == "done" and isinstance(payload.get("trace"), list):
-        filtered = {
-            k: v
-            for k, v in payload.items()
-            if k not in ("input_tokens", "output_tokens")
-        }
-        return {**filtered, "trace": _filter_trace_for_role(payload["trace"], role)}
+        return {**payload, "trace": _filter_trace_for_role(payload["trace"], role)}
     return payload
 
 
@@ -229,7 +223,6 @@ def require_admin(
 
 
 def create_app(container: AppContainer | None = None) -> FastAPI:
-    configure_telemetry_logging()
     deps = container or AppContainer.from_settings()
 
     @asynccontextmanager
@@ -589,12 +582,6 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
             )
         deps.repo.set_setting("active_model", chosen)
         return _models_payload()
-
-    @api.get("/api/metrics")
-    def get_metrics(
-        _admin: Annotated[AuthenticatedUser, Depends(require_admin)],
-    ) -> dict[str, Any]:
-        return deps.repo.get_metrics_summary().model_dump()
 
     @api.post("/api/chat")
     async def chat_stream(

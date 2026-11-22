@@ -12,7 +12,7 @@ Todas as contas pré-cadastradas na demo online usam a senha `Artefact#123`.
 
 | Perfil | E-mail | Cenário pronto para testar |
 | --- | --- | --- |
-| Gestor | `admin@admin.com` | Troca de modelo Gemini 4, toggle de ferramentas, upload da base, trace do guardrail Jev e `GET /api/metrics` |
+| Gestor | `admin@admin.com` | Troca de modelo Gemini 4, toggle de ferramentas, upload da base e trace do guardrail Jev |
 | Cliente | `isabela.moreira@jmail.com` | Pedido `#3` entregue em 05/12/2025 (fora dos 7 dias), bloqueio anti-IDOR ao consultar pedido `#7` e compra pelo chat |
 | Cliente | `leticia.rocha@jmail.com` | Pedido `#7` entregue em 17/02/2026 (Shelby SU-21S), consulta autenticada sem pedir segundo fator |
 | Cliente | `bruno.martins@jmail.com` | E-mail compartilhado por dois cadastros, acionando step-up por telefone `(67) 98543-2109` no pedido `#10` |
@@ -48,7 +48,7 @@ npm run dev
 
 O banco SQLite começa vazio na primeira execução e cria as contas iniciais configuráveis pelo `.env`. Assim que o gestor envia os CSVs da loja (ou ao iniciar sobre uma base já carregada), o seed cria automaticamente uma conta de cliente para cada e-mail único de `customers.csv` (49 contas, como `isabela.moreira@jmail.com`, `leticia.rocha@jmail.com` e `bruno.martins@jmail.com`) usando `SEED_USER_PASSWORD` (`user123` localmente), preservando contas já cadastradas.
 
-- Gestor (`admin@admin.com` e senha `admin123` localmente). Acessa o chat de teste, o endpoint `/api/metrics` e a tela **Ajustes**, onde envia os arquivos da loja, escolhe qual modelo Gemini 4 responde no atendimento e liga ou desliga cada ferramenta do agente.
+- Gestor (`admin@admin.com` e senha `admin123` localmente). Acessa o chat de teste e a tela **Ajustes**, onde envia os arquivos da loja, escolhe qual modelo Gemini 4 responde no atendimento e liga ou desliga cada ferramenta do agente.
 - Cliente (`user@user.com` ou qualquer cliente de `customers.csv` com senha `user123` localmente). Acessa o chat, pedidos por chat com card de confirmação, a aba **Personalização** (instruções de estilo validadas por guardrail e memórias da conta) e o modal **Sobre a loja**. Clientes autenticados em um cadastro da loja podem consultar seus próprios pedidos e elegibilidade de devolução diretamente, mantendo bloqueio contra pedidos de terceiros e desambiguação para e-mails compartilhados. Qualquer pessoa também pode criar uma conta nova em **Criar conta**, sem confirmação por e-mail.
 
 Antes de subir em produção, altere `SEED_ADMIN_EMAIL`, `SEED_ADMIN_PASSWORD`, `SEED_USER_EMAIL`, `SEED_USER_PASSWORD` e `AUTH_SECRET` no `.env` ou no gerenciador de segredos.
@@ -72,11 +72,11 @@ cd web && npm run build
 
 ## Arquitetura
 
-O fluxo abaixo resume a separação entre interface, rate limit, validação de entrada, raciocínio do agente, tarefas auxiliares, observabilidade e persistência local.
+O fluxo abaixo resume a separação entre interface, rate limit, validação de entrada, raciocínio do agente, tarefas auxiliares e persistência local.
 
 ```mermaid
 flowchart TD
-    UI["Interface Web (React e Vite)"] --> API["API FastAPI (SSE, Auth, Rate Limit e Métricas)"]
+    UI["Interface Web (React e Vite)"] --> API["API FastAPI (SSE, Auth, Rate Limit e Ajustes)"]
 
     API -->|chat e instruções| JEV["Guardrail System One (Jev)"]
     JEV -->|bloqueio imediato| API
@@ -85,13 +85,11 @@ flowchart TD
     AGENT --> TOOLS["6 Ferramentas e Regras em Python"]
     API -.->|título em paralelo| MEM["Título, Compactação e Memória"]
     AGENT -.->|pós-resposta| MEM
-    API -.->|JSON por turno| OBS["Telemetria e GET /api/metrics"]
 
     API -->|upload do gestor| ETL["ETL de Ingestão (6 CSVs e PDF)"]
     ETL --> DB[("SQLite (SQLAlchemy ORM e Embeddings)")]
     TOOLS --> DB
     MEM --> DB
-    OBS --> DB
 ```
 
 ## Decisões técnicas
@@ -104,7 +102,7 @@ flowchart TD
 - **Gateways de segurança LGPD e pedidos por chat.** Em [`src/emporio/agent/tools.py`](src/emporio/agent/tools.py), `lookup_order` aplica gateways de segurança em camada de servidor sobre a identidade autenticada via token HMAC, impedindo acesso cruzado a pedidos de terceiros (anti-IDOR), exigindo step-up por telefone quando o e-mail pertence a mais de um cadastro (`bruno.martins@jmail.com`), bloqueando a conversa após cinco tentativas falhas (anti-enumeração) e mantendo 2FA estrito em canais não autenticados ou no modo gestor. Para compras pelo chat, `prepare_order_draft` gera um card separado de confirmação (human-in-the-loop) com preço, estoque, parcelamento e frete validados em Python. Só ao clicar em **Confirmar pedido** (`POST /api/orders/drafts/{draft_id}/confirm`) o pedido é gravado no banco com baixa de estoque e código de rastreio. Para fins de teste, o pedido confirmado é marcado automaticamente como entregue após 5 minutos com mensagem de notificação no chat, permitindo testar imediatamente a devolução dentro do prazo legal de 7 dias.
 - **Guardrail de entrada System One com Jev.** Inspirado na divisão rápido e devagar documentada em [diogo.sh/system-one](https://diogo.sh/system-one/), [`src/emporio/agent/guardrails.py`](src/emporio/agent/guardrails.py) consulta o Jev (`POST https://api.typesafe.ai/v1/systemone`) antes de chamar o Gemini 4. Com probabilidades calibradas (`noul` para prompt injection com limiar `0.85` e `choice` para intenção com limiar `0.90`), tentativas de injeção, assuntos fora de tema e pedidos exclusivos de acessórios recebem resposta imediata em cerca de 240 a 320 ms sem gastar tokens do modelo principal. Consultas legítimas seguem para o agente com a etapa do guardrail visível apenas para o perfil gestor, e qualquer erro de rede faz fail-open para não interromper o atendimento.
 - **Compactação de conversa, memória e personalização por usuário.** [`src/emporio/agent/memory.py`](src/emporio/agent/memory.py) mantém os últimos turnos intactos e compacta mensagens antigas em `session_summaries` quando a conversa cresce, preservando preferências e restrições sem apagar o histórico completo da interface. Em paralelo após a resposta, extrai apenas preferências duráveis e não sensíveis do usuário em `user_memories`, com filtro determinístico em Python contra PII. Na aba **Personalização**, qualquer usuário autenticado pode revisar ou apagar suas memórias e definir instruções gerais de tom e formato (`GET` e `PUT /api/personalization`), validadas por regras determinísticas e pelo guardrail Jev contra injeção persistida antes de salvar.
-- **Observabilidade estruturada e rate limit.** [`src/emporio/observability.py`](src/emporio/observability.py) grava um log JSON de linha única sem PII no logger `emporio.telemetry` e persiste cada turno na tabela `turn_telemetry` com modelo, desfecho, ação e latência do guardrail, latência total, ferramentas acionadas e consumo real de tokens (`input_tokens` e `output_tokens`). O endpoint `GET /api/metrics` (restrito ao gestor) expõe totais, taxa de bloqueio do guardrail, percentis `p50` e `p95` e breakdown por modelo. Em [`src/emporio/api/rate_limit.py`](src/emporio/api/rate_limit.py), um limitador sliding-window protege `POST /api/chat` por usuário (`RATE_LIMIT_CHAT_PER_MINUTE=20`) e `/api/auth/login` e `/api/auth/register` por IP (`RATE_LIMIT_AUTH_PER_MINUTE=15`), retornando HTTP `429` com cabeçalho `Retry-After`.
+- **Rate limit por usuário e por IP.** Em [`src/emporio/api/rate_limit.py`](src/emporio/api/rate_limit.py), um limitador sliding-window protege `POST /api/chat` por usuário (`RATE_LIMIT_CHAT_PER_MINUTE=20`) e `/api/auth/login` e `/api/auth/register` por IP (`RATE_LIMIT_AUTH_PER_MINUTE=15`), retornando HTTP `429` com cabeçalho `Retry-After` para evitar abuso e proteger a cota da API na demo pública.
 - **Núcleo desacoplado de canal.** O agente depende apenas dos contratos em [`src/emporio/ports.py`](src/emporio/ports.py). A API FastAPI e o frontend React atuam como um adaptador fino de entrada e saída, o que permite adicionar ou remover canais como WhatsApp sem reescrever o núcleo.
 
 ## Exemplos de interação
@@ -132,8 +130,9 @@ uv run python -m emporio.evals --model google:gemini-4-hydrogen --with-judge
 
 ## Limitações e próximos passos
 
+- **Observabilidade em produção.** Hoje os traces por mensagem e o histórico de auditoria do ETL ficam persistidos no SQLite para inspeção local e evals. Como próxima etapa para operação em larga escala, entrariam logs estruturados por turno sem PII, medição contínua de latência (`p50`/`p95`), consumo de tokens e taxa de bloqueio do guardrail exportados via OpenTelemetry para um coletor dedicado.
 - **Escala vetorial.** Guardar embeddings no SQLite funciona bem para poucos documentos e evita subir um serviço adicional. Para grandes volumes de texto, o mesmo contrato de busca migraria para um banco vetorial dedicado.
-- **Expansão dos evals em produção.** A suíte atual cobre 58 testes unitários e de API mais 18 cenários de eval calibrados com 14 rótulos humanos. Em operação real, novos traces rotulados por humanos alimentariam continuamente a taxonomia e comparariam diferentes modelos Gemini 4 em latência e custo.
+- **Expansão dos evals em produção.** A suíte atual cobre 56 testes unitários e de API mais 18 cenários de eval calibrados com 14 rótulos humanos. Em operação real, novos traces rotulados por humanos alimentariam continuamente a taxonomia e comparariam diferentes modelos Gemini 4 em latência e custo.
 - **Autenticação e rate limit distribuído.** O login usa hash `scrypt`, token assinado com HMAC e rate limit em memória para um processo único do Uvicorn. Em escala horizontal com múltiplas réplicas, entrariam verificação de e-mail, revogação de sessão e contadores compartilhados em Redis.
 - **Novos canais.** A interface web cobre o fluxo completo de cliente e gestor. Integrar WhatsApp ou Telegram exigiria apenas um novo adaptador sobre `ConversationService`, herdando automaticamente o gateway de verificação em 2 fatores (`order_id` + e-mail ou telefone) para sessões sem login.
 
