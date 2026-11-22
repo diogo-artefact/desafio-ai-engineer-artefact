@@ -139,4 +139,4 @@ uv run python -m emporio.evals --model google:gemini-4-hydrogen --with-judge
 
 ## Uso de assistentes de IA
 
-Conduzi diretamente todas as decisões de engenharia do projeto, incluindo a arquitetura hexagonal, os cortes de escopo, a auditoria das 11 anomalias na base bruta, o desenho dos gateways de segurança LGPD e das regras determinísticas em Python, a definição da taxonomia de falhas e a rotulagem manual dos 14 exemplos de calibração dos evals. Assistentes de IA (modelos Gemini) atuaram na parte operacional sob revisão contínua, acelerando a escrita de boilerplate, a implementação incremental dos módulos em Python e React, os testes automatizados, o protótipo de telas no Paper e scripts de deploy na AWS, com validação e revisão manual de cada commit.
+Conduzi diretamente a arquitetura, os cortes de escopo, a auditoria da base, os gateways de segurança, a taxonomia e a rotulagem dos evals. Assistentes de IA apoiaram o trabalho operacional (boilerplate, implementação incremental, testes e scripts de deploy), com revisão manual de cada commit.
