@@ -1,17 +1,24 @@
 from __future__ import annotations
 
 import io
+import json
 import uuid
 import zipfile
+from collections.abc import AsyncIterator
 from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated, Any
 
+import httpx
 from fastapi import FastAPI, File, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from google.genai import errors as genai_errors
 from pdfplumber.utils.exceptions import PdfminerException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError, UnexpectedModelBehavior
 
+from emporio.agent import ALL_TOOL_IDS, TOOL_REGISTRY
 from emporio.api.container import AppContainer
 from emporio.domain.rules import check_store_hours
 from emporio.etl.loader import REQUIRED_CSV_TABLES, ingest_policy_pdf, ingest_store_csvs
@@ -67,6 +74,35 @@ STORE_PROFILE: dict[str, Any] = {
 
 class CreateSessionRequest(BaseModel):
     title: str = "Nova conversa"
+
+
+class ChatRequest(BaseModel):
+    session_id: str | None = None
+    message: str = Field(min_length=1)
+    enabled_tools: list[str] | None = None
+
+
+def _sse_line(payload: dict[str, Any]) -> str:
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _error_event_from(exc: Exception) -> dict[str, Any]:
+    status_code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+    if isinstance(status_code, int) and status_code == 429:
+        message = "Limite temporário da API do modelo atingido. Tente novamente em instantes."
+    elif isinstance(status_code, int) and status_code >= 500:
+        message = (
+            f"O serviço do modelo está temporariamente indisponível (HTTP {status_code}). "
+            "Sua mensagem foi preservada."
+        )
+    else:
+        message = "Não foi possível concluir a consulta ao modelo agora. Tente novamente."
+    return {
+        "type": "error",
+        "status_code": status_code if isinstance(status_code, int) else 503,
+        "message": message,
+        "detail": str(exc),
+    }
 
 
 def _unpack_csv_uploads(raw_files: list[tuple[str, bytes]]) -> dict[str, bytes]:
@@ -198,5 +234,65 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
     def delete_session(session_id: str) -> Response:
         deps.repo.delete_session(session_id)
         return Response(status_code=204)
+
+    @api.get("/api/tools")
+    def list_tools() -> dict[str, Any]:
+        return {
+            "tools": [
+                {
+                    "tool_id": meta.tool_id,
+                    "label": meta.label,
+                    "description": meta.description,
+                }
+                for meta in TOOL_REGISTRY
+            ]
+        }
+
+    @api.post("/api/chat")
+    async def chat_stream(body: ChatRequest) -> StreamingResponse:
+        clean_message = body.message.strip()
+        if not clean_message:
+            raise HTTPException(status_code=422, detail="A mensagem não pode estar vazia.")
+
+        if body.enabled_tools is not None:
+            unknown = sorted(set(body.enabled_tools) - ALL_TOOL_IDS)
+            if unknown:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Ferramentas desconhecidas: " + ", ".join(unknown),
+                )
+            enabled = frozenset(body.enabled_tools)
+        else:
+            enabled = ALL_TOOL_IDS
+
+        session_id = (body.session_id or "").strip() or uuid.uuid4().hex[:12]
+
+        async def event_generator() -> AsyncIterator[str]:
+            yield _sse_line({"type": "session", "session_id": session_id})
+            try:
+                async for event in deps.conversations.stream_message(
+                    session_id=session_id,
+                    message=clean_message,
+                    enabled_tools=enabled,
+                ):
+                    yield _sse_line(event.model_dump())
+            except (
+                ModelHTTPError,
+                ModelAPIError,
+                UnexpectedModelBehavior,
+                genai_errors.APIError,
+                httpx.HTTPError,
+                OSError,
+            ) as exc:
+                yield _sse_line(_error_event_from(exc))
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     return api
