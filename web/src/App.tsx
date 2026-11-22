@@ -1,13 +1,34 @@
 import { PanelLeft } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { AuthScreen } from "./components/AuthScreen";
+import { ChatView, type ChatTurnError } from "./components/ChatView";
 import { MobileHeader } from "./components/MobileHeader";
 import { Sidebar, type AppView } from "./components/Sidebar";
 import { StoreInfoModal } from "./components/StoreInfoModal";
+import type { DisplayTraceStep } from "./components/TraceSteps";
 import { ApiError, api } from "./lib/api";
 import { clearAuthToken, readAuthToken, writeAuthToken } from "./lib/storage";
-import type { AuthResponse, AuthUser, SessionSummary, StoreInfo } from "./types/api";
+import type {
+  AuthResponse,
+  AuthUser,
+  ChatMessage,
+  ChatStreamEvent,
+  SessionSummary,
+  StoreInfo,
+} from "./types/api";
+
+function formatArgsLine(args: Record<string, unknown>): string | null {
+  const entries = Object.entries(args).filter(
+    ([, value]) => value !== null && value !== undefined && String(value).trim() !== "",
+  );
+  if (entries.length === 0) {
+    return null;
+  }
+  return entries
+    .map(([key, value]) => `${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`)
+    .join(" · ");
+}
 
 export function App() {
   const [token, setToken] = useState<string | null>(() => readAuthToken());
@@ -19,21 +40,47 @@ export function App() {
   const [activeView, setActiveView] = useState<AppView>("chat");
   const [serviceReady, setServiceReady] = useState<boolean>(true);
   const [storeInfo, setStoreInfo] = useState<StoreInfo | null>(null);
+  const [enabledTools, setEnabledTools] = useState<string[] | null>(null);
+
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [loadingSession, setLoadingSession] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [focusSignal, setFocusSignal] = useState(0);
+  const [streaming, setStreaming] = useState(false);
+  const [streamingText, setStreamingText] = useState("");
+  const [liveSteps, setLiveSteps] = useState<DisplayTraceStep[]>([]);
+  const [chatError, setChatError] = useState<ChatTurnError | null>(null);
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [storeModalOpen, setStoreModalOpen] = useState(false);
 
+  const streamAbortRef = useRef<AbortController | null>(null);
+  const skipNextFetchRef = useRef<string | null>(null);
+
+  const stopActiveStream = useCallback(() => {
+    streamAbortRef.current?.abort();
+    streamAbortRef.current = null;
+    setStreaming(false);
+    setStreamingText("");
+    setLiveSteps([]);
+  }, []);
+
   const handleLogout = useCallback(() => {
+    stopActiveStream();
     clearAuthToken();
     setToken(null);
     setUser(null);
     setSessions([]);
     setActiveSessionId(null);
+    setMessages([]);
+    setDraft("");
+    setChatError(null);
+    setEnabledTools(null);
     setActiveView("chat");
     setMobileMenuOpen(false);
     setStoreModalOpen(false);
-  }, []);
+  }, [stopActiveStream]);
 
   useEffect(() => {
     if (!token) {
@@ -94,20 +141,76 @@ export function App() {
     void refreshWorkspace(token);
   }, [token, user, refreshWorkspace]);
 
+  useEffect(() => {
+    if (!token || !user || !activeSessionId) {
+      if (!activeSessionId) {
+        setMessages([]);
+        setLoadingSession(false);
+      }
+      return;
+    }
+
+    if (skipNextFetchRef.current === activeSessionId) {
+      skipNextFetchRef.current = null;
+      return;
+    }
+
+    let cancelled = false;
+    setLoadingSession(true);
+    setChatError(null);
+
+    api
+      .getSession(token, activeSessionId)
+      .then((detail) => {
+        if (!cancelled) {
+          setMessages(detail.messages);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          if (err instanceof ApiError && err.status === 401) {
+            handleLogout();
+          } else {
+            setMessages([]);
+          }
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoadingSession(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [token, user, activeSessionId, handleLogout]);
+
   function handleAuthenticated(auth: AuthResponse): void {
     writeAuthToken(auth.token);
     setToken(auth.token);
     setUser(auth.user);
     setActiveView("chat");
     setActiveSessionId(null);
+    setMessages([]);
+    setChatError(null);
   }
 
   function handleNewChat(): void {
+    stopActiveStream();
     setActiveSessionId(null);
+    setMessages([]);
+    setChatError(null);
     setActiveView("chat");
+    setFocusSignal((prev) => prev + 1);
   }
 
   function handleSelectSession(sessionId: string): void {
+    if (sessionId === activeSessionId && activeView === "chat") {
+      return;
+    }
+    stopActiveStream();
+    setChatError(null);
     setActiveSessionId(sessionId);
     setActiveView("chat");
   }
@@ -120,7 +223,10 @@ export function App() {
       await api.deleteSession(token, sessionId);
       setSessions((prev) => prev.filter((item) => item.session_id !== sessionId));
       if (activeSessionId === sessionId) {
+        stopActiveStream();
         setActiveSessionId(null);
+        setMessages([]);
+        setChatError(null);
       }
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
@@ -136,6 +242,241 @@ export function App() {
     setActiveView("settings");
   }
 
+  async function sendPrompt(rawText: string, replaceLastErrorBubble = false): Promise<void> {
+    const cleanText = rawText.trim();
+    if (!cleanText || !token || !user || streaming) {
+      return;
+    }
+
+    setChatError(null);
+    setDraft("");
+    setStreaming(true);
+    setStreamingText("");
+    setLiveSteps([]);
+
+    const optimisticUser: ChatMessage = {
+      id: -Date.now(),
+      role: "user",
+      content: cleanText,
+      trace: [],
+      created_at: new Date().toISOString(),
+    };
+
+    setMessages((prev) => {
+      const base =
+        replaceLastErrorBubble && prev.length > 0 && prev[prev.length - 1].role === "user"
+          ? prev.slice(0, -1)
+          : prev;
+      return [...base, optimisticUser];
+    });
+
+    const controller = new AbortController();
+    streamAbortRef.current = controller;
+
+    let thinkingCounter = 0;
+    let streamSessionId = activeSessionId;
+
+    const handleStreamEvent = (event: ChatStreamEvent): void => {
+      if (event.type === "session") {
+        streamSessionId = event.session_id;
+        if (event.session_id !== activeSessionId) {
+          skipNextFetchRef.current = event.session_id;
+          setActiveSessionId(event.session_id);
+        }
+        return;
+      }
+
+      if (event.type === "thinking_start") {
+        thinkingCounter += 1;
+        const stepId = `live-think-${thinkingCounter}`;
+        setLiveSteps((prev) => [
+          ...prev,
+          {
+            id: stepId,
+            type: "thinking",
+            label: "Pensando",
+            status: "running",
+            detailLines: [],
+            startedAt: Date.now(),
+          },
+        ]);
+        return;
+      }
+
+      if (event.type === "thinking_delta") {
+        setLiveSteps((prev) => {
+          const next = [...prev];
+          for (let i = next.length - 1; i >= 0; i -= 1) {
+            if (next[i].type === "thinking" && next[i].status === "running") {
+              const current = next[i].detailLines[0] ?? "";
+              next[i] = { ...next[i], detailLines: [current + event.delta] };
+              break;
+            }
+          }
+          return next;
+        });
+        return;
+      }
+
+      if (event.type === "thinking_end") {
+        setLiveSteps((prev) => {
+          const next = [...prev];
+          for (let i = next.length - 1; i >= 0; i -= 1) {
+            if (next[i].type === "thinking" && next[i].status === "running") {
+              const content = event.content.trim();
+              next[i] = {
+                ...next[i],
+                label: "Pensou",
+                status: "done",
+                durationMs: event.duration_ms,
+                detailLines: content ? [content] : next[i].detailLines,
+              };
+              break;
+            }
+          }
+          return next;
+        });
+        return;
+      }
+
+      if (event.type === "tool_start") {
+        const argsLine = formatArgsLine(event.args);
+        setLiveSteps((prev) => [
+          ...prev,
+          {
+            id: event.tool_call_id,
+            type: "tool",
+            label: event.label,
+            status: "running",
+            detailLines: argsLine ? [`Consulta: ${argsLine}`] : [],
+            startedAt: Date.now(),
+          },
+        ]);
+        return;
+      }
+
+      if (event.type === "tool_end") {
+        setLiveSteps((prev) =>
+          prev.map((step) => {
+            if (step.id !== event.tool_call_id) {
+              return step;
+            }
+            const lines = [...step.detailLines];
+            if (event.summary) {
+              lines.push(`Retorno: ${event.summary}`);
+            }
+            return {
+              ...step,
+              label: event.label,
+              status: "done",
+              durationMs: event.duration_ms,
+              detailLines: lines,
+            };
+          }),
+        );
+        return;
+      }
+
+      if (event.type === "text_delta") {
+        setStreamingText((prev) => prev + event.delta);
+        return;
+      }
+
+      if (event.type === "done") {
+        const assistantMessage: ChatMessage = {
+          id: Date.now(),
+          session_id: streamSessionId ?? undefined,
+          role: "assistant",
+          content: event.text,
+          trace: event.trace,
+          created_at: new Date().toISOString(),
+        };
+        setMessages((prev) => [...prev, assistantMessage]);
+        setStreamingText("");
+        setLiveSteps([]);
+        return;
+      }
+
+      if (event.type === "error") {
+        setChatError({
+          statusCode: event.status_code,
+          message: event.message,
+          failedPrompt: cleanText,
+        });
+        setStreamingText("");
+        setLiveSteps([]);
+      }
+    };
+
+    try {
+      await api.streamChat(
+        token,
+        {
+          session_id: activeSessionId,
+          message: cleanText,
+          enabled_tools: user.role === "admin" ? enabledTools : undefined,
+        },
+        handleStreamEvent,
+        controller.signal,
+      );
+      const updatedSessions = await api.listSessions(token);
+      setSessions(updatedSessions);
+    } catch (err) {
+      if (controller.signal.aborted) {
+        return;
+      }
+      if (err instanceof ApiError) {
+        if (err.status === 401) {
+          handleLogout();
+          return;
+        }
+        if (err.status === 503 && user.role === "customer") {
+          setServiceReady(false);
+          setMessages((prev) => prev.slice(0, -1));
+          return;
+        }
+        setChatError({
+          statusCode: err.status,
+          message: err.detail,
+          failedPrompt: cleanText,
+        });
+      } else {
+        setChatError({
+          statusCode: 0,
+          message: "Não foi possível conectar ao servidor agora. Tente novamente em instantes.",
+          failedPrompt: cleanText,
+        });
+      }
+    } finally {
+      if (streamAbortRef.current === controller) {
+        streamAbortRef.current = null;
+      }
+      setStreaming(false);
+      setStreamingText("");
+      setLiveSteps([]);
+    }
+  }
+
+  function handleRetryError(): void {
+    if (!chatError) {
+      return;
+    }
+    void sendPrompt(chatError.failedPrompt, true);
+  }
+
+  function handleEditError(): void {
+    if (!chatError) {
+      return;
+    }
+    const prompt = chatError.failedPrompt;
+    setChatError(null);
+    setMessages((prev) =>
+      prev.length > 0 && prev[prev.length - 1].role === "user" ? prev.slice(0, -1) : prev,
+    );
+    setDraft(prompt);
+    setFocusSignal((prev) => prev + 1);
+  }
+
   if (checkingAuth) {
     return (
       <div className="flex h-full w-full items-center justify-center bg-[var(--color-bg-canvas)] text-[14px] text-[var(--color-ink-secondary)]">
@@ -149,6 +490,8 @@ export function App() {
   }
 
   const activeSession = sessions.find((item) => item.session_id === activeSessionId) ?? null;
+  const showHeaderBorder =
+    activeView === "chat" && (messages.length > 0 || streaming || Boolean(chatError));
 
   return (
     <div className="flex h-full w-full overflow-hidden bg-[var(--color-bg-canvas)]">
@@ -175,7 +518,11 @@ export function App() {
           onNewChat={handleNewChat}
         />
 
-        <div className="hidden h-14 shrink-0 items-center justify-between px-6 md:flex">
+        <div
+          className={`hidden h-14 shrink-0 items-center justify-between px-6 md:flex ${
+            showHeaderBorder ? "border-b border-[var(--color-border-default)]" : ""
+          }`}
+        >
           <div className="flex items-center gap-3">
             {sidebarCollapsed && (
               <button
@@ -187,7 +534,7 @@ export function App() {
                 <PanelLeft size={16} strokeWidth={1.5} />
               </button>
             )}
-            {activeView === "chat" && activeSession && (
+            {showHeaderBorder && activeSession && (
               <span className="text-[16px] font-medium leading-[140%] text-[var(--color-ink-primary)]">
                 {activeSession.title}
               </span>
@@ -195,48 +542,39 @@ export function App() {
           </div>
         </div>
 
-        <main className="flex min-h-0 flex-1 flex-col items-center justify-center px-6 pb-16">
-          {activeView === "settings" && user.role === "admin" ? (
+        {activeView === "settings" && user.role === "admin" ? (
+          <main className="flex min-h-0 flex-1 flex-col items-center overflow-y-auto px-6 py-12">
             <div className="flex w-full max-w-[var(--container-chat)] flex-col gap-2">
               <h1 className="m-0 text-[32px] font-medium leading-[110%] text-[var(--color-ink-primary)]">
                 Ajustes
               </h1>
-              <p className="m-0 text-[14px] leading-[140%] text-[var(--color-ink-secondary)]">
-                Gerencie os arquivos da loja e controle quais ferramentas o agente pode consultar
-              </p>
-            </div>
-          ) : user.role === "customer" && !serviceReady ? (
-            <div className="flex w-full max-w-[var(--container-chat)] flex-col items-start gap-6">
-              <div className="flex flex-col gap-2">
-                <h1 className="m-0 text-[32px] font-medium leading-[110%] text-[var(--color-ink-primary)]">
-                  Atendimento indisponível
-                </h1>
-                <p className="m-0 max-w-[540px] text-[16px] leading-[130%] text-[var(--color-ink-secondary)]">
-                  Nosso atendimento virtual não está disponível no momento. Entre em contato com a
-                  nossa equipe pelo telefone (67) 3341-4444 ou pelo e-mail
-                  contato@emporiodamusica.com.br.
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setStoreModalOpen(true)}
-                className="flex h-10 items-center justify-center rounded-full border border-[var(--color-border-strong)] bg-[var(--color-bg-canvas)] px-5 text-[14px] font-medium leading-[140%] text-[var(--color-ink-primary)] hover:bg-[var(--color-bg-hover)]"
-              >
-                Sobre a loja
-              </button>
-            </div>
-          ) : (
-            <div className="flex w-full max-w-[var(--container-chat)] flex-col gap-2">
-              <h1 className="m-0 text-[24px] font-medium leading-[110%] text-[var(--color-ink-primary)]">
-                Em que instrumento posso ajudar?
-              </h1>
               <p className="m-0 text-[16px] leading-[130%] text-[var(--color-ink-secondary)]">
-                Consulte estoque real, condições de PIX e parcelamento, políticas da loja ou seu
-                pedido
+                Gerencie os arquivos da loja, o modelo Gemini 4 e as ferramentas do agente
               </p>
             </div>
-          )}
-        </main>
+          </main>
+        ) : (
+          <ChatView
+            user={user}
+            serviceReady={serviceReady}
+            messages={messages}
+            loadingSession={loadingSession}
+            streaming={streaming}
+            streamingText={streamingText}
+            liveSteps={liveSteps}
+            chatError={chatError}
+            draft={draft}
+            focusSignal={focusSignal}
+            onDraftChange={setDraft}
+            onSend={(text) => void sendPrompt(text)}
+            onStop={stopActiveStream}
+            onRetryError={handleRetryError}
+            onEditError={handleEditError}
+            onRetryMessage={(prompt) => void sendPrompt(prompt)}
+            onOpenStoreInfo={() => setStoreModalOpen(true)}
+            onOpenSettings={handleOpenSettings}
+          />
+        )}
       </div>
 
       <StoreInfoModal

@@ -91,7 +91,8 @@ export interface ToolTraceEntry {
 export type TraceEntry = ThinkingTraceEntry | ToolTraceEntry;
 
 export interface ChatMessage {
-  message_id: number;
+  id: number;
+  session_id?: string;
   role: "user" | "assistant";
   content: string;
   trace: TraceEntry[];
@@ -107,6 +108,17 @@ export interface ToolInfo {
   tool_id: string;
   label: string;
   description: string;
+}
+
+export interface ModelInfo {
+  model_id: string;
+  label: string;
+  description: string;
+}
+
+export interface ModelsResponse {
+  active_model: string;
+  models: ModelInfo[];
 }
 
 export interface ChatRequestPayload {

@@ -6,6 +6,7 @@ import type {
   HealthResponse,
   KnowledgeStatus,
   KnowledgeUploadResponse,
+  ModelsResponse,
   SessionDetailResponse,
   SessionSummary,
   StoreInfo,
@@ -201,6 +202,18 @@ export const api = {
   async listTools(token: string): Promise<ToolInfo[]> {
     const data = await requestJson<{ tools: ToolInfo[] }>("/api/tools", { token });
     return data.tools;
+  },
+
+  listModels(token: string): Promise<ModelsResponse> {
+    return requestJson<ModelsResponse>("/api/models", { token });
+  },
+
+  updateModel(token: string, modelId: string): Promise<ModelsResponse> {
+    return requestJson<ModelsResponse>("/api/models", {
+      method: "PUT",
+      token,
+      body: { model_id: modelId },
+    });
   },
 
   async streamChat(
