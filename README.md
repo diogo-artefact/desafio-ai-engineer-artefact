@@ -33,10 +33,10 @@ npm run dev
 
 ### Perfis de acesso e carga inicial
 
-O banco SQLite começa vazio na primeira execução e cria duas contas iniciais configuráveis pelo `.env`.
+O banco SQLite começa vazio na primeira execução e cria as contas iniciais configuráveis pelo `.env`. Assim que o gestor envia os CSVs da loja (ou ao iniciar sobre uma base já carregada), o seed cria automaticamente uma conta de cliente para cada e-mail único de `customers.csv` (49 contas, como `leticia.rocha@jmail.com`, `pedro.oliveira@jmail.com` e `lucas.mendes@jmail.com`) usando `SEED_USER_PASSWORD` (`user123`), preservando contas já cadastradas.
 
 - Gestor (`admin@admin.com` e senha `admin123`). Acessa o chat de teste e a tela **Ajustes**, onde envia os arquivos da loja, escolhe qual modelo Gemini 4 responde no atendimento e liga ou desliga cada ferramenta do agente.
-- Cliente (`user@user.com` e senha `user123`). Acessa o chat, a aba **Personalização** (instruções de estilo validadas por guardrail e memórias da conta) e o modal **Sobre a loja**. Qualquer pessoa pode criar uma conta nova de cliente em **Criar conta**, sem confirmação por e-mail.
+- Cliente (`user@user.com` ou qualquer cliente de `customers.csv` com senha `user123`). Acessa o chat, a aba **Personalização** (instruções de estilo validadas por guardrail e memórias da conta) e o modal **Sobre a loja**. Clientes autenticados em um cadastro da loja podem consultar seus próprios pedidos e elegibilidade de devolução diretamente, mantendo bloqueio contra pedidos de terceiros e desambiguação para e-mails compartilhados. Qualquer pessoa também pode criar uma conta nova em **Criar conta**, sem confirmação por e-mail.
 
 Antes de subir em produção, altere `SEED_ADMIN_EMAIL`, `SEED_ADMIN_PASSWORD`, `SEED_USER_EMAIL`, `SEED_USER_PASSWORD` e `AUTH_SECRET` no `.env`.
 
@@ -57,13 +57,35 @@ uv run ruff check src tests
 cd web && npm run build
 ```
 
+## Arquitetura
+
+O fluxo abaixo resume a separação entre interface, validação de entrada, raciocínio do agente, tarefas auxiliares e persistência local.
+
+```mermaid
+flowchart TD
+    UI["Interface Web (React e Vite)"] --> API["API FastAPI (SSE, Auth, Ajustes e Personalização)"]
+
+    API -->|chat e instruções| JEV["Guardrail System One (Jev)"]
+    JEV -->|bloqueio imediato| API
+    JEV -->|consulta válida| AGENT["Agente PydanticAI (Gemini 4)"]
+
+    AGENT --> TOOLS["6 Ferramentas e Regras em Python"]
+    API -.->|título em paralelo| MEM["Título, Compactação e Memória"]
+    AGENT -.->|pós-resposta| MEM
+
+    API -->|upload do gestor| ETL["ETL de Ingestão (6 CSVs e PDF)"]
+    ETL --> DB[("SQLite (SQLAlchemy ORM e Embeddings)")]
+    TOOLS --> DB
+    MEM --> DB
+```
+
 ## Decisões técnicas
 
 - **Ingestão em dois slots independentes.** A base começa vazia e recebe os seis CSVs em `ingest_store_csvs` e o PDF em `ingest_policy_pdf`. Reenviar um conjunto não apaga o outro nem as conversas salvas. Os arquivos originais ficam intactos em [`data/raw/`](data/raw/).
 - **Sanitização auditável.** Os CSVs brutos contêm seis produtos com marca ou ficha técnica trocada na descrição (`135`, `137`, `139`, `140`, `142` e `144`), um produto descontinuado com estoque 13 (`136`), um pré-lançamento presente em pedidos antigos (`130`), um item ativo sem estoque (`96`) e um e-mail repetido entre os clientes `11` e `43`. O PDF lista dois telefones diferentes, `(67) 3341-4444` e `(67) 3321-4500`, e um e-mail com acento. O ETL prioriza nome e `specs`, zera o estoque descontinuado, mantém itens históricos como não vendáveis e registra cada ajuste na tabela `etl_audit_log`.
 - **ORM no catálogo e busca vetorial no manual.** Preço, estoque e pedidos saem de consultas tipadas no SQLAlchemy sobre SQLite. O manual em PDF é dividido em 26 trechos por seção e subseção, recebe embeddings `gemini-embedding-001` na ingestão e usa similaridade de cosseno na busca, com fallback por palavras em Python se a API falhar.
-- **Regras de negócio fora do prompt.** O cálculo de 5% no PIX não cumulativo com promoções, os valores mínimos de parcela em até 12x sem juros, o frete para Campo Grande e outras cidades, a verificação LGPD de pedidos em dois fatores e o prazo legal de 7 dias para devolução rodam em Python determinístico em [`src/emporio/domain/rules.py`](src/emporio/domain/rules.py).
-- **Modelos Gemini 4 e ferramentas controláveis.** O agente usa PydanticAI com streaming de raciocínio e chamadas de ferramenta. Apenas o gestor pode alternar o modelo ativo entre os quatro modelos Gemini 4 (`gemini-4-hydrogen`, `gemini-4-neon`, `gemini-4-carbon` e `gemini-4-argon`) e desativar qualquer uma das cinco ferramentas para testar limites de resposta sem invenção de dados.
+- **Regras de negócio e gateways de segurança fora do prompt.** O cálculo de 5% no PIX não cumulativo com promoções, os valores mínimos de parcela em até 12x sem juros, o frete para Campo Grande e outras cidades e o prazo legal de 7 dias para devolução rodam em Python determinístico em [`src/emporio/domain/rules.py`](src/emporio/domain/rules.py). Em [`src/emporio/agent/tools.py`](src/emporio/agent/tools.py), `lookup_order` aplica gateways de segurança em camada de servidor sobre a identidade autenticada via token HMAC, impedindo acesso cruzado a pedidos de terceiros (anti-IDOR), exigindo step-up por telefone quando o e-mail pertence a mais de um cadastro (`bruno.martins@jmail.com`), bloqueando a conversa após cinco tentativas falhas (anti-enumeração) e mantendo 2FA estrito em canais não autenticados ou no modo gestor.
+- **Modelos Gemini 4, ferramentas controláveis e pedidos por chat.** O agente usa PydanticAI com streaming de raciocínio e chamadas de ferramenta. Apenas o gestor pode alternar o modelo ativo entre os quatro modelos Gemini 4 (`gemini-4-hydrogen`, `gemini-4-neon`, `gemini-4-carbon` e `gemini-4-argon`) e desativar qualquer uma das seis ferramentas para testar limites de resposta sem invenção de dados. Para compras pelo chat, `prepare_order_draft` gera um card separado de confirmação (human-in-the-loop) com preço, estoque, parcelamento e frete validados em Python; só ao clicar em **Confirmar pedido** (`POST /api/orders/drafts/{draft_id}/confirm`) o pedido é gravado no banco com baixa de estoque e código de rastreio. Para fins de teste, o pedido confirmado é marcado automaticamente como entregue após 5 minutos com mensagem de notificação no chat, permitindo testar imediatamente a devolução dentro do prazo legal de 7 dias.
 - **Guardrail de entrada System One com Jev.** Inspirado na divisão rápido e devagar documentada em [diogo.sh/system-one](https://diogo.sh/system-one/), [`src/emporio/agent/guardrails.py`](src/emporio/agent/guardrails.py) consulta o Jev (`POST https://api.typesafe.ai/v1/systemone`) antes de chamar o Gemini 4. Com probabilidades calibradas (`noul` para prompt injection com limiar `0.85` e `choice` para intenção com limiar `0.90`), tentativas de injeção, assuntos fora de tema e pedidos exclusivos de acessórios recebem resposta imediata em cerca de 240 a 320 ms sem gastar tokens do modelo principal. Consultas legítimas seguem para o agente com a etapa do guardrail visível apenas para o perfil gestor, e qualquer erro de rede faz fail-open para não interromper o atendimento.
 - **Compactação de conversa, memória e personalização por usuário.** [`src/emporio/agent/memory.py`](src/emporio/agent/memory.py) mantém os últimos turnos intactos e compacta mensagens antigas em `session_summaries` quando a conversa cresce, preservando preferências e restrições sem apagar o histórico completo da interface. Em paralelo após a resposta, extrai apenas preferências duráveis e não sensíveis do usuário em `user_memories`, com filtro determinístico em Python contra PII. Na aba **Personalização**, qualquer usuário autenticado pode revisar ou apagar suas memórias e definir instruções gerais de tom e formato (`GET` e `PUT /api/personalization`), validadas por regras determinísticas e pelo guardrail Jev contra injeção persistida antes de salvar.
 - **Núcleo desacoplado de canal.** O agente depende apenas dos contratos em [`src/emporio/ports.py`](src/emporio/ports.py). A API FastAPI e o frontend React atuam como um adaptador fino de entrada e saída, o que permite adicionar ou remover canais como WhatsApp sem reescrever o núcleo.
@@ -84,9 +106,9 @@ uv run python -m emporio.evals --model google:gemini-4-hydrogen --with-judge
 ## Limitações e próximos passos
 
 - **Escala vetorial.** Guardar embeddings no SQLite funciona bem para poucos documentos e evita subir um serviço adicional. Para grandes volumes de texto, o mesmo contrato de busca migraria para um banco vetorial dedicado.
-- **Expansão dos evals em produção.** A suíte atual cobre 50 testes unitários e de API mais 18 cenários de eval calibrados com 14 rótulos humanos. Em operação real, novos traces rotulados por humanos alimentariam continuamente a taxonomia e comparariam diferentes modelos Gemini 4 em latência e custo.
+- **Expansão dos evals em produção.** A suíte atual cobre 54 testes unitários e de API mais 18 cenários de eval calibrados com 14 rótulos humanos. Em operação real, novos traces rotulados por humanos alimentariam continuamente a taxonomia e comparariam diferentes modelos Gemini 4 em latência e custo.
 - **Autenticação em produção.** O login atual usa hash `scrypt` e token assinado com HMAC para simplificar a execução local. Em ambiente aberto, entrariam verificação de e-mail, revogação de sessão e limite de tentativas.
-- **Novos canais.** A interface web cobre o fluxo completo de cliente e gestor. Integrar WhatsApp ou Telegram exigiria apenas um novo adaptador sobre `ConversationService`.
+- **Novos canais.** A interface web cobre o fluxo completo de cliente e gestor. Integrar WhatsApp ou Telegram exigiria apenas um novo adaptador sobre `ConversationService`, herdando automaticamente o gateway de verificação em 2 fatores (`order_id` + e-mail ou telefone) para sessões sem login.
 
 ## Uso de assistentes de IA
 

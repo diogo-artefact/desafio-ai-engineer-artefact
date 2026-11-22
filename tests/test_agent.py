@@ -15,8 +15,10 @@ from pydantic_ai.models.function import (
 
 from emporio.agent import (
     ALL_TOOL_IDS,
+    MAX_FAILED_ORDER_LOOKUPS_PER_SESSION,
     AgentDeps,
     ConversationService,
+    OrderSecurityState,
     SupportAgent,
     TextDeltaEvent,
     ThinkingEndEvent,
@@ -254,3 +256,151 @@ async def test_simulate_tool_summary_formats_brl_and_not_found(tmp_path: Path) -
     done = await agent.reply("Simule", [], deps)
     summaries = {entry["summary"] for entry in done.trace}
     assert summaries == {"PIX R$ 1.967,18 · até 12x", "Produto não encontrado"}
+
+
+async def test_authenticated_customer_order_lookup_and_security_gateways(tmp_path: Path) -> None:
+    repo = _loaded_repo(tmp_path)
+    seen_results: list[dict] = []
+
+    async def call_my_orders(
+        messages: list[ModelMessage],
+        info: AgentInfo,
+    ) -> AsyncIterator[str | dict[int, DeltaToolCall]]:
+        if len(messages) == 1:
+            yield {
+                0: DeltaToolCall(name="lookup_order", json_args='{"order_id": 3}'),
+                1: DeltaToolCall(
+                    name="lookup_order",
+                    json_args='{"order_id": 7, "contact": "leticia.rocha@jmail.com"}',
+                ),
+            }
+            return
+        for part in messages[-1].parts:
+            if hasattr(part, "content") and isinstance(part.content, dict):
+                seen_results.append(part.content)
+        yield "Verifiquei seus pedidos."
+
+    agent = SupportAgent(model=FunctionModel(stream_function=call_my_orders))
+    isabela_deps = AgentDeps(
+        catalog=repo,
+        orders=repo,
+        policies=repo,
+        knowledge=repo,
+        user_role="customer",
+        user_name="Isabela Moreira Cunha",
+        user_email="isabela.moreira@jmail.com",
+        reference_time=datetime(2026, 2, 20, 14, 0, tzinfo=CG_TZ),
+    )
+    done = await agent.reply("Quero devolver o pedido nº 3", [], isabela_deps)
+    own_result = next(r for r in seen_results if r.get("verified") is True)
+    idor_blocked = next(r for r in seen_results if r.get("verified") is False)
+    assert own_result["gateway"] == "authenticated_owner"
+    assert own_result["order"]["order_id"] == 3
+    assert idor_blocked["gateway"] == "ownership_mismatch"
+    assert {entry["summary"] for entry in done.trace} == {
+        "Pedido #3 · entregue",
+        "Bloqueado pelo gateway · pedido não pertence à conta",
+    }
+
+    pedro_results: list[dict] = []
+
+    async def call_single_no_args(
+        messages: list[ModelMessage],
+        info: AgentInfo,
+    ) -> AsyncIterator[str | dict[int, DeltaToolCall]]:
+        if len(messages) == 1:
+            yield {0: DeltaToolCall(name="lookup_order", json_args="{}")}
+            return
+        for part in messages[-1].parts:
+            if hasattr(part, "content") and isinstance(part.content, dict):
+                pedro_results.append(part.content)
+        yield "Listei seus pedidos."
+
+    pedro_agent = SupportAgent(model=FunctionModel(stream_function=call_single_no_args))
+    pedro_deps = AgentDeps(
+        catalog=repo,
+        orders=repo,
+        policies=repo,
+        knowledge=repo,
+        user_role="customer",
+        user_name="Pedro Henrique Oliveira",
+        user_email="pedro.oliveira@jmail.com",
+        reference_time=datetime(2026, 2, 20, 14, 0, tzinfo=CG_TZ),
+    )
+    pedro_done = await pedro_agent.reply("Quais pedidos eu fiz?", [], pedro_deps)
+    assert pedro_results[0]["verified"] is True
+    assert {item["order"]["order_id"] for item in pedro_results[0]["orders"]} == {1, 19}
+    assert pedro_done.trace[0]["summary"] == "2 pedido(s) encontrado(s) na conta"
+
+    bruno_results: list[dict] = []
+
+    async def call_bruno(
+        messages: list[ModelMessage],
+        info: AgentInfo,
+    ) -> AsyncIterator[str | dict[int, DeltaToolCall]]:
+        if len(messages) == 1:
+            yield {
+                0: DeltaToolCall(name="lookup_order", json_args='{"order_id": 10}'),
+                1: DeltaToolCall(
+                    name="lookup_order",
+                    json_args='{"order_id": 10, "contact": "(67) 99456-3456"}',
+                ),
+                2: DeltaToolCall(
+                    name="lookup_order",
+                    json_args='{"order_id": 10, "contact": "(67) 98543-2109"}',
+                ),
+            }
+            return
+        for part in messages[-1].parts:
+            if hasattr(part, "content") and isinstance(part.content, dict):
+                bruno_results.append(part.content)
+        yield "Verificado."
+
+    bruno_agent = SupportAgent(model=FunctionModel(stream_function=call_bruno))
+    bruno_deps = AgentDeps(
+        catalog=repo,
+        orders=repo,
+        policies=repo,
+        knowledge=repo,
+        user_role="customer",
+        user_name="Bruno Carvalho Martins",
+        user_email="bruno.martins@jmail.com",
+    )
+    bruno_done = await bruno_agent.reply("Verifique meu pedido", [], bruno_deps)
+    gateways = {r["gateway"] for r in bruno_results}
+    assert gateways == {"duplicate_email_step_up", "ownership_mismatch", "step_up_phone_verified"}
+    verified_bruno = next(r for r in bruno_results if r.get("verified") is True)
+    assert verified_bruno["order"]["order_id"] == 10
+    assert "Gateway LGPD · confirmação por telefone necessária" in {
+        entry["summary"] for entry in bruno_done.trace
+    }
+
+    locked_results: list[dict] = []
+
+    async def call_locked(
+        messages: list[ModelMessage],
+        info: AgentInfo,
+    ) -> AsyncIterator[str | dict[int, DeltaToolCall]]:
+        if len(messages) == 1:
+            yield {0: DeltaToolCall(name="lookup_order", json_args='{"order_id": 3}')}
+            return
+        for part in messages[-1].parts:
+            if hasattr(part, "content") and isinstance(part.content, dict):
+                locked_results.append(part.content)
+        yield "Bloqueado."
+
+    locked_agent = SupportAgent(model=FunctionModel(stream_function=call_locked))
+    locked_deps = AgentDeps(
+        catalog=repo,
+        orders=repo,
+        policies=repo,
+        knowledge=repo,
+        user_role="customer",
+        user_name="Isabela Moreira Cunha",
+        user_email="isabela.moreira@jmail.com",
+        order_security=OrderSecurityState(failed_attempts=MAX_FAILED_ORDER_LOOKUPS_PER_SESSION),
+    )
+    locked_done = await locked_agent.reply("Ver pedido 3", [], locked_deps)
+    assert locked_results[0]["verified"] is False
+    assert locked_results[0]["gateway"] == "rate_limit"
+    assert locked_done.trace[0]["summary"] == "Bloqueado pelo gateway · limite de tentativas"

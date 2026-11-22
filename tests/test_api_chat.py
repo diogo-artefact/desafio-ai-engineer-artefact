@@ -75,8 +75,9 @@ def test_list_tools_and_chat_sse_stream_persists_turn(tmp_path: Path) -> None:
     tools_res = client.get("/api/tools", headers=admin_headers)
     assert tools_res.status_code == 200
     tool_ids = [t["tool_id"] for t in tools_res.json()["tools"]]
-    assert len(tool_ids) == 5
+    assert len(tool_ids) == 6
     assert "lookup_order" in tool_ids
+    assert "prepare_order_draft" in tool_ids
 
     res = client.post(
         "/api/chat",

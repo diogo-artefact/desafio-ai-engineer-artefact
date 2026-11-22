@@ -86,9 +86,42 @@ export interface ToolTraceEntry {
   summary: string;
   args: Record<string, unknown>;
   duration_ms: number;
+  draft_id?: string;
 }
 
 export type TraceEntry = ThinkingTraceEntry | ToolTraceEntry;
+
+export type OrderDraftStatus = "pending" | "confirmed" | "cancelled" | "delivered";
+
+export interface OrderDraft {
+  draft_id: string;
+  session_id: string;
+  user_id: string;
+  product_id: number;
+  product_name: string;
+  quantity: number;
+  unit_price_brl: number;
+  discount_percent: number;
+  subtotal_brl: number;
+  shipping_brl: number;
+  shipping_note: string;
+  total_brl: number;
+  payment_method: string;
+  payment_label: string;
+  city: string;
+  status: OrderDraftStatus;
+  order_id: number | null;
+  tracking_code: string;
+  created_at: string;
+  confirmed_at: string | null;
+  deliver_at: string | null;
+  delivered_at: string | null;
+}
+
+export interface ConfirmOrderDraftResponse {
+  draft: OrderDraft;
+  message: ChatMessage;
+}
 
 export interface ChatMessage {
   id: number;
@@ -102,6 +135,7 @@ export interface ChatMessage {
 export interface SessionDetailResponse {
   session: SessionSummary;
   messages: ChatMessage[];
+  order_drafts?: OrderDraft[];
 }
 
 export interface ToolInfo {
@@ -142,6 +176,7 @@ export interface ChatRequestPayload {
 export type ChatStreamEvent =
   | { type: "session"; session_id: string }
   | { type: "session_title"; session_id: string; title: string }
+  | { type: "order_draft"; draft: OrderDraft }
   | { type: "thinking_start" }
   | { type: "thinking_delta"; delta: string }
   | { type: "thinking_end"; duration_ms: number; content: string }

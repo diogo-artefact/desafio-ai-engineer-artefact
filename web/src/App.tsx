@@ -18,6 +18,7 @@ import type {
   ChatStreamEvent,
   KnowledgeStatus,
   ModelInfo,
+  OrderDraft,
   SessionSummary,
   StoreInfo,
   ToolInfo,
@@ -55,6 +56,9 @@ export function App() {
   const [loadingAdmin, setLoadingAdmin] = useState(false);
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [orderDrafts, setOrderDrafts] = useState<OrderDraft[]>([]);
+  const [draftBusyId, setDraftBusyId] = useState<string | null>(null);
+  const [draftErrors, setDraftErrors] = useState<Record<string, string>>({});
   const [loadingSession, setLoadingSession] = useState(false);
   const [draft, setDraft] = useState("");
   const [focusSignal, setFocusSignal] = useState(0);
@@ -87,6 +91,9 @@ export function App() {
     setActiveSessionId(null);
     setLoadingTitleSessionId(null);
     setMessages([]);
+    setOrderDrafts([]);
+    setDraftBusyId(null);
+    setDraftErrors({});
     setDraft("");
     setChatError(null);
     setKnowledge(null);
@@ -182,6 +189,8 @@ export function App() {
     if (!token || !user || !activeSessionId) {
       if (!activeSessionId) {
         setMessages([]);
+        setOrderDrafts([]);
+        setDraftErrors({});
         setLoadingSession(false);
       }
       return;
@@ -195,12 +204,14 @@ export function App() {
     let cancelled = false;
     setLoadingSession(true);
     setChatError(null);
+    setDraftErrors({});
 
     api
       .getSession(token, activeSessionId)
       .then((detail) => {
         if (!cancelled) {
           setMessages(detail.messages);
+          setOrderDrafts(detail.order_drafts ?? []);
         }
       })
       .catch((err) => {
@@ -209,6 +220,7 @@ export function App() {
             handleLogout();
           } else {
             setMessages([]);
+            setOrderDrafts([]);
           }
         }
       })
@@ -223,6 +235,33 @@ export function App() {
     };
   }, [token, user, activeSessionId, handleLogout]);
 
+  const refreshActiveSession = useCallback(async () => {
+    if (!token || !activeSessionId || streaming) {
+      return;
+    }
+    try {
+      const detail = await api.getSession(token, activeSessionId);
+      setMessages(detail.messages);
+      setOrderDrafts(detail.order_drafts ?? []);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        handleLogout();
+      }
+    }
+  }, [token, activeSessionId, streaming, handleLogout]);
+
+  const hasPendingDelivery = orderDrafts.some((item) => item.status === "confirmed");
+
+  useEffect(() => {
+    if (!hasPendingDelivery || !token || !activeSessionId || streaming) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      void refreshActiveSession();
+    }, 15000);
+    return () => window.clearInterval(timer);
+  }, [hasPendingDelivery, token, activeSessionId, streaming, refreshActiveSession]);
+
   function handleAuthenticated(auth: AuthResponse): void {
     writeAuthToken(auth.token);
     setToken(auth.token);
@@ -230,6 +269,8 @@ export function App() {
     setActiveView("chat");
     setActiveSessionId(null);
     setMessages([]);
+    setOrderDrafts([]);
+    setDraftErrors({});
     setChatError(null);
   }
 
@@ -237,6 +278,8 @@ export function App() {
     stopActiveStream();
     setActiveSessionId(null);
     setMessages([]);
+    setOrderDrafts([]);
+    setDraftErrors({});
     setChatError(null);
     setActiveView("chat");
     setFocusSignal((prev) => prev + 1);
@@ -263,6 +306,8 @@ export function App() {
         stopActiveStream();
         setActiveSessionId(null);
         setMessages([]);
+        setOrderDrafts([]);
+        setDraftErrors({});
         setChatError(null);
       }
     } catch (err) {
@@ -359,6 +404,19 @@ export function App() {
             item.session_id === event.session_id ? { ...item, title: event.title } : item,
           ),
         );
+        return;
+      }
+
+      if (event.type === "order_draft") {
+        setOrderDrafts((prev) => {
+          const exists = prev.some((item) => item.draft_id === event.draft.draft_id);
+          if (exists) {
+            return prev.map((item) =>
+              item.draft_id === event.draft.draft_id ? event.draft : item,
+            );
+          }
+          return [...prev, event.draft];
+        });
         return;
       }
 
@@ -555,6 +613,73 @@ export function App() {
     setFocusSignal((prev) => prev + 1);
   }
 
+  async function handleConfirmOrderDraft(draftId: string): Promise<void> {
+    if (!token || draftBusyId !== null) {
+      return;
+    }
+    setDraftBusyId(draftId);
+    setDraftErrors((prev) => {
+      const next = { ...prev };
+      delete next[draftId];
+      return next;
+    });
+    try {
+      const res = await api.confirmOrderDraft(token, draftId);
+      setOrderDrafts((prev) =>
+        prev.map((item) => (item.draft_id === draftId ? res.draft : item)),
+      );
+      setMessages((prev) => [...prev, res.message]);
+    } catch (err) {
+      if (err instanceof ApiError) {
+        if (err.status === 401) {
+          handleLogout();
+          return;
+        }
+        setDraftErrors((prev) => ({ ...prev, [draftId]: err.detail }));
+      } else {
+        setDraftErrors((prev) => ({
+          ...prev,
+          [draftId]: "Não foi possível confirmar este pedido agora.",
+        }));
+      }
+    } finally {
+      setDraftBusyId(null);
+    }
+  }
+
+  async function handleCancelOrderDraft(draftId: string): Promise<void> {
+    if (!token || draftBusyId !== null) {
+      return;
+    }
+    setDraftBusyId(draftId);
+    setDraftErrors((prev) => {
+      const next = { ...prev };
+      delete next[draftId];
+      return next;
+    });
+    try {
+      const updated = await api.cancelOrderDraft(token, draftId);
+      setOrderDrafts((prev) =>
+        prev.map((item) => (item.draft_id === draftId ? updated : item)),
+      );
+    } catch (err) {
+      if (err instanceof ApiError) {
+        if (err.status === 401) {
+          handleLogout();
+          return;
+        }
+        setDraftErrors((prev) => ({ ...prev, [draftId]: err.detail }));
+      } else {
+        setDraftErrors((prev) => ({
+          ...prev,
+          [draftId]: "Não foi possível cancelar este pedido agora.",
+        }));
+      }
+    } finally {
+      setDraftBusyId(null);
+    }
+  }
+
   if (checkingAuth) {
     return (
       <div className="flex h-full w-full items-center justify-center bg-[var(--color-bg-canvas)] text-[14px] text-[var(--color-ink-secondary)]">
@@ -650,6 +775,9 @@ export function App() {
             user={user}
             serviceReady={serviceReady}
             messages={messages}
+            orderDrafts={orderDrafts}
+            draftBusyId={draftBusyId}
+            draftErrors={draftErrors}
             loadingSession={loadingSession}
             streaming={streaming}
             streamingText={streamingText}
@@ -663,6 +791,9 @@ export function App() {
             onRetryError={handleRetryError}
             onEditError={handleEditError}
             onRetryMessage={(prompt) => void sendPrompt(prompt)}
+            onConfirmOrderDraft={(draftId) => void handleConfirmOrderDraft(draftId)}
+            onCancelOrderDraft={(draftId) => void handleCancelOrderDraft(draftId)}
+            onDeliveryDue={() => void refreshActiveSession()}
             onOpenStoreInfo={() => setStoreModalOpen(true)}
             onOpenSettings={handleOpenSettings}
           />

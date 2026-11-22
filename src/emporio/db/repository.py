@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 import logging
 import re
+import secrets
+import string
 import uuid
-from datetime import UTC, datetime
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +23,7 @@ from emporio.db.schema import (
     CustomerRow,
     KnowledgeSourceRow,
     MessageRow,
+    OrderDraftRow,
     OrderItemRow,
     OrderRow,
     PolicyChunkRow,
@@ -36,6 +40,7 @@ from emporio.db.schema import (
 from emporio.domain.models import (
     KnowledgeSourceStatus,
     KnowledgeStatus,
+    OrderDraft,
     OrderInfo,
     OrderItemInfo,
     PolicyChunkHit,
@@ -46,10 +51,28 @@ from emporio.domain.models import (
     UserMemory,
     UserPersonalization,
 )
+from emporio.domain.rules import STORE_TZ
 from emporio.domain.text import normalize_phone_digits, normalize_text
 from emporio.etl.embeddings import Embedder, cosine_similarity
 
 logger = logging.getLogger(__name__)
+
+
+TRACKING_ALPHABET = string.ascii_uppercase + string.digits
+
+
+def _utc_iso(dt: datetime | None = None) -> str:
+    resolved = dt.astimezone(UTC) if dt is not None else datetime.now(UTC)
+    return resolved.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _generate_tracking_code() -> str:
+    middle = "".join(secrets.choice(TRACKING_ALPHABET) for _ in range(9))
+    return f"BR{middle}BR"
+
+
+def _format_brl(value: float) -> str:
+    return f"R$ {value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
 def _query_terms(text: str) -> list[str]:
@@ -281,6 +304,40 @@ class SQLiteStoreRepository:
                 for p, cat_name in pairs
             ]
 
+    def _build_order_info(
+        self,
+        session: Session,
+        order: OrderRow,
+        customer: CustomerRow,
+    ) -> OrderInfo:
+        items_stmt = (
+            select(OrderItemRow, ProductRow.name)
+            .join(ProductRow, ProductRow.product_id == OrderItemRow.product_id)
+            .where(OrderItemRow.order_id == order.order_id)
+            .order_by(OrderItemRow.product_id.asc())
+        )
+        items = [
+            OrderItemInfo(
+                product_id=item.product_id,
+                product_name=prod_name,
+                quantity=item.quantity,
+            )
+            for item, prod_name in session.execute(items_stmt).all()
+        ]
+        return OrderInfo(
+            order_id=order.order_id,
+            customer_name=customer.name,
+            customer_city=customer.city,
+            order_date=order.order_date,
+            status=order.status,
+            total_brl=order.total_brl,
+            payment_method=order.payment_method,
+            tracking_code=order.tracking_code,
+            estimated_delivery=order.estimated_delivery,
+            notes=order.notes,
+            items=items,
+        )
+
     def verify_and_get_order(self, order_id: int, contact: str) -> OrderInfo | None:
         raw_contact = contact.strip()
         if not raw_contact:
@@ -310,33 +367,78 @@ class SQLiteStoreRepository:
             if not verified:
                 return None
 
-            items_stmt = (
-                select(OrderItemRow, ProductRow.name)
-                .join(ProductRow, ProductRow.product_id == OrderItemRow.product_id)
-                .where(OrderItemRow.order_id == order_id)
-                .order_by(OrderItemRow.product_id.asc())
-            )
-            items = [
-                OrderItemInfo(
-                    product_id=item.product_id,
-                    product_name=prod_name,
-                    quantity=item.quantity,
+            return self._build_order_info(session, order, customer)
+
+    def count_customers_by_email(self, email: str) -> int:
+        norm = normalize_text(email)
+        if not norm or "@" not in norm:
+            return 0
+        with self._session() as session:
+            count = session.scalar(
+                select(func.count(CustomerRow.customer_id)).where(
+                    CustomerRow.email_normalized == norm
                 )
-                for item, prod_name in session.execute(items_stmt).all()
-            ]
-            return OrderInfo(
-                order_id=order.order_id,
-                customer_name=customer.name,
-                customer_city=customer.city,
-                order_date=order.order_date,
-                status=order.status,
-                total_brl=order.total_brl,
-                payment_method=order.payment_method,
-                tracking_code=order.tracking_code,
-                estimated_delivery=order.estimated_delivery,
-                notes=order.notes,
-                items=items,
             )
+            return int(count or 0)
+
+    def list_orders_for_email(self, email: str) -> list[OrderInfo]:
+        norm = normalize_text(email)
+        if not norm or "@" not in norm:
+            return []
+        with self._session() as session:
+            stmt = (
+                select(OrderRow, CustomerRow)
+                .join(CustomerRow, CustomerRow.customer_id == OrderRow.customer_id)
+                .where(CustomerRow.email_normalized == norm)
+                .order_by(OrderRow.order_date.desc(), OrderRow.order_id.desc())
+            )
+            return [
+                self._build_order_info(session, order, customer)
+                for order, customer in session.execute(stmt).all()
+            ]
+
+    def match_customer_email_and_phone(self, email: str, phone: str) -> bool:
+        norm = normalize_text(email)
+        digits = normalize_phone_digits(phone)
+        if not norm or "@" not in norm or len(digits) < 8:
+            return False
+        with self._session() as session:
+            customers = session.scalars(
+                select(CustomerRow).where(CustomerRow.email_normalized == norm)
+            )
+            return any(
+                digits == c.phone_digits or c.phone_digits.endswith(digits) for c in customers
+            )
+
+    def list_orders_for_email_and_phone(self, email: str, phone: str) -> list[OrderInfo]:
+        norm = normalize_text(email)
+        digits = normalize_phone_digits(phone)
+        if not norm or "@" not in norm or len(digits) < 8:
+            return []
+        with self._session() as session:
+            stmt = (
+                select(OrderRow, CustomerRow)
+                .join(CustomerRow, CustomerRow.customer_id == OrderRow.customer_id)
+                .where(CustomerRow.email_normalized == norm)
+                .order_by(OrderRow.order_date.desc(), OrderRow.order_id.desc())
+            )
+            matched: list[OrderInfo] = []
+            for order, customer in session.execute(stmt).all():
+                if digits == customer.phone_digits or customer.phone_digits.endswith(digits):
+                    matched.append(self._build_order_info(session, order, customer))
+            return matched
+
+    def get_customer_city_by_email(self, email: str) -> str | None:
+        norm = normalize_text(email)
+        if not norm or "@" not in norm:
+            return None
+        with self._session() as session:
+            row = session.scalar(
+                select(CustomerRow)
+                .where(CustomerRow.email_normalized == norm)
+                .order_by(CustomerRow.customer_id.asc())
+            )
+            return row.city if row is not None and row.city.strip() else None
 
     def search_policies(self, query: str, limit: int = 4) -> list[PolicyChunkHit]:
         with self._session() as session:
@@ -520,6 +622,45 @@ class SQLiteStoreRepository:
                 )
             )
             session.commit()
+
+    def sync_customer_seed_users(
+        self,
+        password_factory: Callable[[], str],
+    ) -> int:
+        with self._session() as session:
+            customers = list(
+                session.scalars(select(CustomerRow).order_by(CustomerRow.customer_id.asc()))
+            )
+            if not customers:
+                return 0
+            existing_emails = set(session.scalars(select(UserRow.email)))
+            to_create: list[tuple[str, str]] = []
+            seen: set[str] = set()
+            for customer in customers:
+                norm = customer.email.strip().lower()
+                if not norm or "@" not in norm or norm in existing_emails or norm in seen:
+                    continue
+                seen.add(norm)
+                to_create.append((customer.name.strip() or norm.split("@")[0], norm))
+            if not to_create:
+                return 0
+            password_hash = password_factory()
+            now = datetime.now(UTC).isoformat()
+            session.add_all(
+                [
+                    UserRow(
+                        user_id=uuid.uuid4().hex[:12],
+                        name=name,
+                        email=email_norm,
+                        password_hash=password_hash,
+                        role="customer",
+                        created_at=now,
+                    )
+                    for name, email_norm in to_create
+                ]
+            )
+            session.commit()
+            return len(to_create)
 
     def list_sessions(self, user_id: str | None = None) -> list[dict[str, Any]]:
         with self._session() as session:
@@ -776,3 +917,278 @@ class SQLiteStoreRepository:
                 row.updated_at = now
             session.commit()
         return UserPersonalization(custom_instructions=clean, updated_at=now)
+
+    def _row_to_order_draft(self, row: OrderDraftRow) -> OrderDraft:
+        return OrderDraft(
+            draft_id=row.draft_id,
+            session_id=row.session_id,
+            user_id=row.user_id,
+            product_id=row.product_id,
+            product_name=row.product_name,
+            quantity=row.quantity,
+            unit_price_brl=row.unit_price_brl,
+            discount_percent=row.discount_percent,
+            subtotal_brl=row.subtotal_brl,
+            shipping_brl=row.shipping_brl,
+            shipping_note=row.shipping_note,
+            total_brl=row.total_brl,
+            payment_method=row.payment_method,
+            payment_label=row.payment_label,
+            city=row.city,
+            status=row.status,
+            order_id=row.order_id,
+            tracking_code=row.tracking_code,
+            created_at=row.created_at,
+            confirmed_at=row.confirmed_at,
+            deliver_at=row.deliver_at,
+            delivered_at=row.delivered_at,
+        )
+
+    def create_order_draft(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        product_id: int,
+        product_name: str,
+        quantity: int,
+        unit_price_brl: float,
+        discount_percent: float,
+        subtotal_brl: float,
+        shipping_brl: float,
+        shipping_note: str,
+        total_brl: float,
+        payment_method: str,
+        payment_label: str,
+        city: str,
+    ) -> OrderDraft:
+        now = _utc_iso()
+        row = OrderDraftRow(
+            draft_id=uuid.uuid4().hex[:12],
+            session_id=session_id,
+            user_id=user_id,
+            product_id=product_id,
+            product_name=product_name,
+            quantity=quantity,
+            unit_price_brl=unit_price_brl,
+            discount_percent=discount_percent,
+            subtotal_brl=subtotal_brl,
+            shipping_brl=shipping_brl,
+            shipping_note=shipping_note,
+            total_brl=total_brl,
+            payment_method=payment_method,
+            payment_label=payment_label,
+            city=city,
+            status="pending",
+            order_id=None,
+            tracking_code="",
+            created_at=now,
+            confirmed_at=None,
+            deliver_at=None,
+            delivered_at=None,
+        )
+        with self._session() as session:
+            session.add(row)
+            session.commit()
+            return self._row_to_order_draft(row)
+
+    def list_session_order_drafts(self, session_id: str) -> list[OrderDraft]:
+        with self._session() as session:
+            stmt = (
+                select(OrderDraftRow)
+                .where(OrderDraftRow.session_id == session_id)
+                .order_by(OrderDraftRow.created_at.asc())
+            )
+            return [self._row_to_order_draft(row) for row in session.scalars(stmt)]
+
+    def get_order_draft(
+        self, draft_id: str, user_id: str | None = None
+    ) -> OrderDraft | None:
+        with self._session() as session:
+            row = session.get(OrderDraftRow, draft_id)
+            if row is None:
+                return None
+            if user_id is not None and row.user_id != user_id:
+                return None
+            return self._row_to_order_draft(row)
+
+    def confirm_order_draft(
+        self,
+        draft_id: str,
+        user: AuthenticatedUser,
+        auto_delivery_seconds: int = 300,
+    ) -> tuple[OrderDraft, dict[str, Any]]:
+        now_dt = datetime.now(UTC)
+        now_iso = _utc_iso(now_dt)
+        deliver_at_iso = _utc_iso(now_dt + timedelta(seconds=max(0, auto_delivery_seconds)))
+        local_today = now_dt.astimezone(STORE_TZ).date().isoformat()
+
+        with self._session() as session:
+            draft = session.get(OrderDraftRow, draft_id)
+            if draft is None or draft.user_id != user.user_id:
+                raise LookupError("Pedido não encontrado.")
+            if draft.status != "pending":
+                raise ValueError("Este pedido já foi confirmado ou cancelado.")
+
+            product = session.get(ProductRow, draft.product_id)
+            if (
+                product is None
+                or not product.is_sellable
+                or product.stock_quantity < draft.quantity
+            ):
+                raise ValueError("Este instrumento não possui estoque suficiente no momento.")
+
+            email_norm = normalize_text(user.email)
+            customer = session.scalar(
+                select(CustomerRow)
+                .where(CustomerRow.email_normalized == email_norm)
+                .order_by(CustomerRow.customer_id.asc())
+            )
+            if customer is None:
+                next_cid = int(session.scalar(select(func.max(CustomerRow.customer_id))) or 0) + 1
+                customer = CustomerRow(
+                    customer_id=next_cid,
+                    name=user.name.strip() or user.email,
+                    name_normalized=normalize_text(user.name or user.email),
+                    phone="",
+                    phone_digits="",
+                    email=user.email,
+                    email_normalized=email_norm,
+                    city=draft.city,
+                )
+                session.add(customer)
+                session.flush()
+
+            product.stock_quantity = max(0, product.stock_quantity - draft.quantity)
+            product.is_sellable = product.status == "active" and product.stock_quantity > 0
+
+            next_order_id = int(session.scalar(select(func.max(OrderRow.order_id))) or 0) + 1
+            tracking_code = _generate_tracking_code()
+            session.add(
+                OrderRow(
+                    order_id=next_order_id,
+                    customer_id=customer.customer_id,
+                    order_date=local_today,
+                    status="confirmed",
+                    total_brl=draft.total_brl,
+                    payment_method=draft.payment_method,
+                    tracking_code=tracking_code,
+                    estimated_delivery="",
+                    notes="Pedido realizado pelo chat",
+                )
+            )
+            session.flush()
+            session.add(
+                OrderItemRow(
+                    order_id=next_order_id,
+                    product_id=draft.product_id,
+                    quantity=draft.quantity,
+                )
+            )
+
+            draft.status = "confirmed"
+            draft.order_id = next_order_id
+            draft.tracking_code = tracking_code
+            draft.confirmed_at = now_iso
+            draft.deliver_at = deliver_at_iso
+
+            minutes = max(1, round(auto_delivery_seconds / 60)) if auto_delivery_seconds > 0 else 0
+            delivery_hint = (
+                f"Para fins de teste, este pedido será marcado automaticamente como entregue "
+                f"em {minutes} {'minuto' if minutes == 1 else 'minutos'}."
+                if minutes > 0
+                else "Para fins de teste, a entrega simulada será concluída em instantes."
+            )
+            confirmation_text = (
+                f"Pedido **#{next_order_id}** confirmado ({draft.quantity}x {draft.product_name}, "
+                f"total **{_format_brl(draft.total_brl)}**, {draft.payment_label}). "
+                f"Código de rastreio `{tracking_code}`. {delivery_hint}"
+            )
+            msg = MessageRow(
+                session_id=draft.session_id,
+                role="assistant",
+                content=confirmation_text,
+                trace_json="[]",
+                created_at=now_iso,
+            )
+            session.add(msg)
+            parent = session.get(SessionRow, draft.session_id)
+            if parent is not None:
+                parent.updated_at = now_iso
+            session.flush()
+
+            message_payload = {
+                "id": msg.id,
+                "session_id": msg.session_id,
+                "role": msg.role,
+                "content": msg.content,
+                "trace": [],
+                "created_at": msg.created_at,
+            }
+            updated_draft = self._row_to_order_draft(draft)
+            session.commit()
+            return updated_draft, message_payload
+
+    def cancel_order_draft(self, draft_id: str, user_id: str) -> OrderDraft:
+        with self._session() as session:
+            draft = session.get(OrderDraftRow, draft_id)
+            if draft is None or draft.user_id != user_id:
+                raise LookupError("Pedido não encontrado.")
+            if draft.status != "pending":
+                raise ValueError("Apenas pedidos pendentes podem ser cancelados.")
+            draft.status = "cancelled"
+            updated = self._row_to_order_draft(draft)
+            session.commit()
+            return updated
+
+    def finalize_due_deliveries(self, now: datetime | None = None) -> list[OrderDraft]:
+        now_dt = now.astimezone(UTC) if now is not None else datetime.now(UTC)
+        now_iso = _utc_iso(now_dt)
+        local_today = now_dt.astimezone(STORE_TZ).date().isoformat()
+
+        delivered: list[OrderDraft] = []
+        with self._session() as session:
+            stmt = (
+                select(OrderDraftRow)
+                .where(
+                    OrderDraftRow.status == "confirmed",
+                    OrderDraftRow.deliver_at.is_not(None),
+                    OrderDraftRow.deliver_at <= now_iso,
+                )
+                .order_by(OrderDraftRow.deliver_at.asc())
+            )
+            due_rows = list(session.scalars(stmt))
+            if not due_rows:
+                return []
+
+            for draft in due_rows:
+                if draft.order_id is not None:
+                    order = session.get(OrderRow, draft.order_id)
+                    if order is not None and order.status != "cancelled":
+                        order.status = "delivered"
+                        order.estimated_delivery = local_today
+
+                draft.status = "delivered"
+                draft.delivered_at = now_iso
+                notification = (
+                    f"Seu pedido **#{draft.order_id}** ({draft.quantity}x {draft.product_name}) "
+                    f"foi marcado como **entregue** (código de rastreio `{draft.tracking_code}`). "
+                    "Caso precise de ajuda, troca ou devolução dentro do prazo legal de 7 dias "
+                    "corridos, é só avisar por aqui."
+                )
+                session.add(
+                    MessageRow(
+                        session_id=draft.session_id,
+                        role="assistant",
+                        content=notification,
+                        trace_json="[]",
+                        created_at=now_iso,
+                    )
+                )
+                parent = session.get(SessionRow, draft.session_id)
+                if parent is not None:
+                    parent.updated_at = now_iso
+                delivered.append(self._row_to_order_draft(draft))
+
+            session.commit()
+        return delivered

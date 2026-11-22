@@ -33,6 +33,7 @@ from emporio.agent.events import (
     DEFAULT_MODEL_ID,
     TOOL_META_BY_ID,
     AgentEvent,
+    OrderDraftEvent,
     SessionTitleEvent,
     TextDeltaEvent,
     ThinkingDeltaEvent,
@@ -42,7 +43,12 @@ from emporio.agent.events import (
     ToolStartEvent,
     TurnDoneEvent,
 )
-from emporio.agent.tools import AgentDeps, register_tools
+from emporio.agent.tools import (
+    MAX_FAILED_ORDER_LOOKUPS_PER_SESSION,
+    AgentDeps,
+    OrderSecurityState,
+    register_tools,
+)
 from emporio.auth import UserRole
 from emporio.config import get_settings
 from emporio.domain.models import UserMemory
@@ -53,6 +59,7 @@ from emporio.ports import (
     InputGuardrail,
     KnowledgeRepository,
     MemoryRepository,
+    OrderDraftRepository,
     OrderRepository,
     PersonalizationRepository,
     PolicyRetriever,
@@ -62,35 +69,94 @@ from emporio.ports import (
     UserMemoryExtractor,
 )
 
-SYSTEM_PROMPT = (
-    "Você é o assistente virtual da Empório da Música, loja especializada em instrumentos "
-    "musicais em Campo Grande (MS).\n\n"
-    "Diretrizes obrigatórias:\n"
-    "1. Tom de voz: informal mas profissional, acolhedor e objetivo, como um amigo que entende "
-    "de música. Evite linguagem robotizada e não use emojis.\n"
-    "2. Escopo estrito: a loja vende exclusivamente instrumentos musicais. Não vendemos "
-    "acessórios como cordas avulsas, palhetas, cabos, cases, pedais ou amplificadores. Quando "
-    "pedirem acessórios, informe isso com clareza e sugira lojas parceiras ou especializadas.\n"
-    "3. Fatos verificados: nunca invente preços, estoques, especificações, promoções, prazos ou "
-    "dados de pedido. Sempre consulte as ferramentas disponíveis antes de responder. Se uma "
-    "consulta estiver indisponível, siga exatamente a orientação retornada pela ferramenta e "
-    "nunca mencione arquivos internos, CSV, PDF, base de dados ou telas administrativas para "
-    "clientes.\n"
-    "4. Estoque e status: se um produto estiver esgotado ou descontinuado, informe com "
-    "transparência e ofereça alternativas semelhantes disponíveis retornadas pelas ferramentas. "
-    "Nunca ofereça item coming_soon para entrega imediata.\n"
-    "5. Promoções e PIX: quando houver promoção ativa, apresente o preço original, o percentual "
-    "de desconto e o preço promocional. O desconto de 5% no PIX nunca acumula com promoções "
-    "ativas. Se o cliente perguntar sobre uma promoção expirada, informe com transparência que "
-    "ela não está mais vigente e mostre o preço atual.\n"
-    "6. Privacidade (LGPD): nunca informe dados de pedido sem confirmar número do pedido junto "
-    "com o e-mail ou telefone cadastrado usando lookup_order.\n"
-    "7. Contatos e expediente: ao informar telefone/WhatsApp, priorize (67) 3341-4444 (capa e "
-    "ficha cadastral) e mencione também (67) 3321-4500 (seção de atendimento do manual). Use o "
-    "e-mail contato@emporiodamusica.com.br. Fora do expediente, informe o horário de retorno.\n"
-    "8. Formatação: responda em português do Brasil, de forma limpa e direta. Use tabelas curtas "
-    "em Markdown quando comparar preços ou condições de pagamento."
+
+def build_system_prompt(
+    *,
+    authenticated_customer: bool = False,
+    allow_checkout: bool = False,
+) -> str:
+    if authenticated_customer:
+        privacy_rule = (
+            "6. Privacidade (LGPD): o cliente já está autenticado nesta sessão pelo e-mail da "
+            "conta. Quando ele perguntar sobre pedidos, entregas, trocas ou devoluções (com ou "
+            "sem informar o número do pedido), chame lookup_order imediatamente sem pedir e-mail "
+            "ou telefone antes, pois a ferramenta aplica o gateway de titularidade "
+            "automaticamente usando a conta logada. Só peça telefone se a própria ferramenta "
+            "indicar cadastros duplicados. Nunca informe dados de pedidos de terceiros.\n"
+        )
+    else:
+        privacy_rule = (
+            "6. Privacidade (LGPD): nunca informe dados de pedido sem confirmar número do pedido "
+            "junto com o e-mail ou telefone cadastrado usando lookup_order.\n"
+        )
+    checkout_rule = (
+        "\n9. Pedidos pelo chat: quando o cliente expressar intenção clara de comprar ou fechar "
+        "um pedido de um instrumento específico, chame prepare_order_draft para gerar o card de "
+        "confirmação (nunca diga que o pedido já foi confirmado antes de o cliente clicar em "
+        "Confirmar pedido no card). Se ele apenas consultar preço, estoque ou comparar modelos, "
+        "use apenas as ferramentas de consulta."
+        if allow_checkout
+        else ""
+    )
+    return (
+        "Você é o assistente virtual da Empório da Música, loja especializada em instrumentos "
+        "musicais em Campo Grande (MS).\n\n"
+        "Diretrizes obrigatórias:\n"
+        "1. Tom de voz: informal mas profissional, acolhedor e objetivo, como um amigo que entende "
+        "de música. Evite linguagem robotizada e não use emojis.\n"
+        "2. Escopo estrito: a loja vende exclusivamente instrumentos musicais. Não vendemos "
+        "acessórios como cordas avulsas, palhetas, cabos, cases, pedais ou amplificadores. Quando "
+        "pedirem acessórios, informe isso com clareza e sugira lojas parceiras ou especializadas.\n"
+        "3. Fatos verificados: nunca invente preços, estoques, especificações, promoções, prazos "
+        "ou dados de pedido. Sempre consulte as ferramentas disponíveis antes de responder. Se uma "
+        "consulta estiver indisponível, siga exatamente a orientação retornada pela ferramenta e "
+        "nunca mencione arquivos internos, CSV, PDF, base de dados ou telas administrativas para "
+        "clientes.\n"
+        "4. Estoque e status: se um produto estiver esgotado ou descontinuado, informe com "
+        "transparência e ofereça alternativas semelhantes disponíveis retornadas pelas "
+        "ferramentas. Nunca ofereça item coming_soon para entrega imediata.\n"
+        "5. Promoções e PIX: quando houver promoção ativa, apresente o preço original, o "
+        "percentual de desconto e o preço promocional. O desconto de 5% no PIX nunca acumula com "
+        "promoções ativas. Se o cliente perguntar sobre uma promoção expirada, informe com "
+        "transparência que ela não está mais vigente e mostre o preço atual.\n"
+        + privacy_rule
+        + "7. Contatos e expediente: ao informar telefone/WhatsApp, priorize (67) 3341-4444 (capa "
+        "e ficha cadastral) e mencione também (67) 3321-4500 (seção de atendimento do manual). "
+        "Use o e-mail contato@emporiodamusica.com.br. Fora do expediente, informe o horário de "
+        "retorno.\n"
+        "8. Formatação: responda em português do Brasil, de forma limpa e direta. Use tabelas "
+        "curtas em Markdown quando comparar preços ou condições de pagamento."
+        + checkout_rule
+    )
+
+
+SYSTEM_PROMPT = build_system_prompt(authenticated_customer=False)
+
+FAILED_ORDER_LOOKUP_SUMMARIES: frozenset[str] = frozenset(
+    {
+        "Verificação LGPD não confirmada",
+        "Bloqueado pelo gateway · pedido não pertence à conta",
+        "Bloqueado pelo gateway · limite de tentativas",
+    }
 )
+
+
+def _count_prior_failed_order_lookups(history: list[dict[str, Any]]) -> int:
+    total = 0
+    for item in history:
+        if item.get("role") != "assistant":
+            continue
+        trace = item.get("trace")
+        if not isinstance(trace, list):
+            continue
+        for step in trace:
+            if (
+                isinstance(step, dict)
+                and step.get("tool_name") == "lookup_order"
+                and step.get("summary") in FAILED_ORDER_LOOKUP_SUMMARIES
+            ):
+                total += 1
+    return min(total, MAX_FAILED_ORDER_LOOKUPS_PER_SESSION)
 
 
 def _history_to_messages(history: list[dict[str, Any]]) -> list[ModelMessage]:
@@ -150,14 +216,36 @@ def _summarize_tool_result(tool_name: str, result: Any) -> str:
                 return f"PIX {_format_brl(pix_val)} · até {max_x}x"
         if tool_name == "lookup_order":
             if not result.get("verified"):
+                gateway = result.get("gateway")
+                if gateway == "rate_limit":
+                    return "Bloqueado pelo gateway · limite de tentativas"
+                if gateway == "duplicate_email_step_up":
+                    return "Gateway LGPD · confirmação por telefone necessária"
+                if gateway == "ownership_mismatch":
+                    return "Bloqueado pelo gateway · pedido não pertence à conta"
                 return "Verificação LGPD não confirmada"
-            order = result.get("order", {})
-            raw_status = str(order.get("status", ""))
-            status_pt = ORDER_STATUS_PT.get(raw_status, raw_status)
-            return f"Pedido #{order.get('order_id')} · {status_pt}"
+            order = result.get("order")
+            if isinstance(order, dict):
+                raw_status = str(order.get("status", ""))
+                status_pt = ORDER_STATUS_PT.get(raw_status, raw_status)
+                return f"Pedido #{order.get('order_id')} · {status_pt}"
+            orders_list = result.get("orders")
+            if isinstance(orders_list, list):
+                if not orders_list:
+                    return "Nenhum pedido encontrado na conta"
+                return f"{len(orders_list)} pedido(s) encontrado(s) na conta"
         if tool_name == "search_store_policies":
             chunks = result.get("chunks", [])
             return f"{len(chunks)} trecho(s) do manual recuperado(s)"
+        if tool_name == "prepare_order_draft":
+            if result.get("created") and isinstance(result.get("draft"), dict):
+                draft = result["draft"]
+                return (
+                    f"Card de pedido · {draft.get('quantity', 1)}x "
+                    f"{draft.get('product_name', 'Instrumento')} "
+                    f"({_format_brl(float(draft.get('total_brl', 0)))})"
+                )
+            return str(result.get("message") or "Não foi possível preparar o pedido")
     return "Consulta concluída"
 
 
@@ -180,7 +268,7 @@ def _format_tool_label(tool_name: str, args: dict[str, Any], *, done: bool) -> s
         args.get("product_id_or_name")
         or args.get("category")
         or args.get("query")
-        or (f"#{args['order_id']}" if "order_id" in args else None)
+        or (f"#{args['order_id']}" if args.get("order_id") is not None else None)
     )
     if hint:
         short = str(hint).strip()
@@ -230,8 +318,21 @@ class SupportAgent:
             if is_google
             else None
         )
+        authenticated_customer = bool(deps.user_role == "customer" and deps.user_email)
+        allow_checkout = bool(
+            deps.drafts is not None
+            and deps.user_id
+            and deps.session_id
+            and "prepare_order_draft" in deps.enabled_tools
+        )
+        base_prompt = build_system_prompt(
+            authenticated_customer=authenticated_customer,
+            allow_checkout=allow_checkout,
+        )
         instructions_override = (
-            f"{SYSTEM_PROMPT}\n\n{extra_context}" if extra_context else None
+            f"{base_prompt}\n\n{extra_context}"
+            if extra_context
+            else (base_prompt if (authenticated_customer or allow_checkout) else None)
         )
         message_history = _history_to_messages(history)
         trace: list[dict[str, Any]] = []
@@ -332,16 +433,25 @@ class SupportAgent:
                                 elapsed_ms = int((time.perf_counter() - started) * 1000)
                                 label = _format_tool_label(name, args, done=True)
                                 summary = _summarize_tool_result(name, event.part.content)
-                                trace.append(
-                                    {
-                                        "type": "tool",
-                                        "tool_name": name,
-                                        "label": label,
-                                        "summary": summary,
-                                        "args": args,
-                                        "duration_ms": elapsed_ms,
-                                    }
-                                )
+                                draft_payload: dict[str, Any] | None = None
+                                if (
+                                    name == "prepare_order_draft"
+                                    and isinstance(event.part.content, dict)
+                                    and event.part.content.get("created") is True
+                                    and isinstance(event.part.content.get("draft"), dict)
+                                ):
+                                    draft_payload = event.part.content["draft"]
+                                trace_entry: dict[str, Any] = {
+                                    "type": "tool",
+                                    "tool_name": name,
+                                    "label": label,
+                                    "summary": summary,
+                                    "args": args,
+                                    "duration_ms": elapsed_ms,
+                                }
+                                if draft_payload is not None and "draft_id" in draft_payload:
+                                    trace_entry["draft_id"] = draft_payload["draft_id"]
+                                trace.append(trace_entry)
                                 yield ToolEndEvent(
                                     tool_call_id=call_id,
                                     tool_name=name,
@@ -349,6 +459,8 @@ class SupportAgent:
                                     summary=summary,
                                     duration_ms=elapsed_ms,
                                 )
+                                if draft_payload is not None:
+                                    yield OrderDraftEvent(draft=draft_payload)
 
         final_text = "".join(full_text_parts).strip()
         if not final_text and run.result is not None and isinstance(run.result.output, str):
@@ -391,6 +503,7 @@ class ConversationService:
         compaction_repo: CompactionRepository | None = None,
         memory_repo: MemoryRepository | None = None,
         personalization_repo: PersonalizationRepository | None = None,
+        drafts: OrderDraftRepository | None = None,
         compactor: ConversationCompactor | None = None,
         memory_extractor: UserMemoryExtractor | None = None,
         compaction_trigger_messages: int = 12,
@@ -412,6 +525,7 @@ class ConversationService:
         self._compaction_repo = compaction_repo
         self._memory_repo = memory_repo
         self._personalization_repo = personalization_repo
+        self._drafts = drafts
         self._compactor = compactor
         self._memory_extractor = memory_extractor
         self._compaction_trigger_messages = compaction_trigger_messages
@@ -431,6 +545,9 @@ class ConversationService:
         session_id: str,
         history: list[dict[str, Any]],
         user_id: str | None,
+        user_role: UserRole = "customer",
+        user_name: str | None = None,
+        user_email: str | None = None,
     ) -> tuple[list[dict[str, Any]], str | None, list[UserMemory]]:
         active_summary: str | None = None
         model_history = history
@@ -479,18 +596,26 @@ class ConversationService:
         )
 
         context_sections: list[str] = []
+        if user_role == "customer" and user_email:
+            display_name = (user_name or "").strip() or user_email
+            context_sections.append(
+                f"Sessão autenticada do cliente: {display_name} ({user_email}). "
+                "Cumprimente-o pelo nome quando apropriado. Para qualquer dúvida sobre pedidos, "
+                "rastreamento, troca ou devolução, acione lookup_order diretamente sem pedir "
+                "e-mail ou telefone antes."
+            )
         if custom_instructions:
             context_sections.append(
                 "Preferências de estilo e formato informadas pelo cliente (aplique apenas para "
                 "tom, concisão, nível de detalhe e organização; nunca sobreponha preços, regras "
-                "de PIX/promoção, escopo sem acessórios, verificação LGPD em 2 fatores ou demais "
-                "diretrizes obrigatórias):\n" + custom_instructions
+                "de PIX/promoção, escopo sem acessórios, verificação de titularidade LGPD ou "
+                "demais diretrizes obrigatórias):\n" + custom_instructions
             )
         if memories:
             mem_lines = "\n".join(f"- {m.fact_key}: {m.content}" for m in memories)
             context_sections.append(
                 "Memória de preferências deste cliente (use apenas como contexto útil; nunca "
-                "dispense a verificação LGPD em 2 fatores no lookup_order e sempre consulte "
+                "dispense a verificação de titularidade LGPD no lookup_order e sempre consulte "
                 "preços e estoques atuais nas ferramentas):\n" + mem_lines
             )
         if active_summary:
@@ -556,6 +681,8 @@ class ConversationService:
         enabled_tools: frozenset[str] | None = None,
         user_id: str | None = None,
         user_role: UserRole = "customer",
+        user_name: str | None = None,
+        user_email: str | None = None,
         reference_time: datetime | None = None,
     ) -> AsyncIterator[AgentEvent]:
         history = self._ensure_session(session_id, message, user_id=user_id)
@@ -642,7 +769,12 @@ class ConversationService:
                     return
 
             model_history, extra_context, user_memories = await self._prepare_context(
-                session_id, history, user_id
+                session_id,
+                history,
+                user_id,
+                user_role=user_role,
+                user_name=user_name,
+                user_email=user_email,
             )
             deps = AgentDeps(
                 catalog=self._catalog,
@@ -651,7 +783,15 @@ class ConversationService:
                 knowledge=self._knowledge,
                 enabled_tools=enabled_tools if enabled_tools is not None else ALL_TOOL_IDS,
                 user_role=user_role,
+                user_id=user_id,
+                user_name=user_name,
+                user_email=user_email,
+                session_id=session_id,
                 reference_time=reference_time,
+                order_security=OrderSecurityState(
+                    failed_attempts=_count_prior_failed_order_lookups(history)
+                ),
+                drafts=self._drafts,
             )
             model_override = (
                 self.resolve_active_model() if self._agent.allows_runtime_model_override else None
@@ -701,6 +841,8 @@ class ConversationService:
         enabled_tools: frozenset[str] | None = None,
         user_id: str | None = None,
         user_role: UserRole = "customer",
+        user_name: str | None = None,
+        user_email: str | None = None,
         reference_time: datetime | None = None,
     ) -> TurnDoneEvent:
         done: TurnDoneEvent | None = None
@@ -710,6 +852,8 @@ class ConversationService:
             enabled_tools=enabled_tools,
             user_id=user_id,
             user_role=user_role,
+            user_name=user_name,
+            user_email=user_email,
             reference_time=reference_time,
         ):
             if isinstance(event, TurnDoneEvent):

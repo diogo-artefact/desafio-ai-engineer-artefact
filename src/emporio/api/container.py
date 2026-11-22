@@ -51,19 +51,31 @@ class AppContainer:
         resolved_settings = settings or get_settings()
         resolved_db = Path(db_path)
         repo = SQLiteStoreRepository(resolved_db, embedder=embedder)
-        if resolved_settings.seed_admin_email and resolved_settings.seed_admin_password:
+        if (
+            resolved_settings.seed_admin_email
+            and resolved_settings.seed_admin_password
+            and repo.get_user_with_hash_by_email(resolved_settings.seed_admin_email) is None
+        ):
             repo.ensure_seed_user(
                 name="Gestor",
                 email=resolved_settings.seed_admin_email,
                 password_hash=hash_password(resolved_settings.seed_admin_password),
                 role="admin",
             )
-        if resolved_settings.seed_user_email and resolved_settings.seed_user_password:
+        if (
+            resolved_settings.seed_user_email
+            and resolved_settings.seed_user_password
+            and repo.get_user_with_hash_by_email(resolved_settings.seed_user_email) is None
+        ):
             repo.ensure_seed_user(
                 name="Cliente",
                 email=resolved_settings.seed_user_email,
                 password_hash=hash_password(resolved_settings.seed_user_password),
                 role="customer",
+            )
+        if resolved_settings.seed_user_password:
+            repo.sync_customer_seed_users(
+                lambda: hash_password(resolved_settings.seed_user_password)
             )
         agent = SupportAgent(model=model if model is not None else resolved_settings.llm_model)
         conversations = ConversationService(
@@ -80,6 +92,7 @@ class AppContainer:
             compaction_repo=repo,
             memory_repo=repo,
             personalization_repo=repo,
+            drafts=repo,
             compactor=compactor,
             memory_extractor=memory_extractor,
         )

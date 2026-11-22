@@ -3,10 +3,12 @@ import type {
   AuthUser,
   ChatRequestPayload,
   ChatStreamEvent,
+  ConfirmOrderDraftResponse,
   HealthResponse,
   KnowledgeStatus,
   KnowledgeUploadResponse,
   ModelsResponse,
+  OrderDraft,
   SessionDetailResponse,
   SessionSummary,
   StoreInfo,
@@ -173,6 +175,27 @@ export const api = {
       method: "DELETE",
       token,
     });
+  },
+
+  confirmOrderDraft(token: string, draftId: string): Promise<ConfirmOrderDraftResponse> {
+    return requestJson<ConfirmOrderDraftResponse>(
+      `/api/orders/drafts/${encodeURIComponent(draftId)}/confirm`,
+      {
+        method: "POST",
+        token,
+      },
+    );
+  },
+
+  async cancelOrderDraft(token: string, draftId: string): Promise<OrderDraft> {
+    const data = await requestJson<{ draft: OrderDraft }>(
+      `/api/orders/drafts/${encodeURIComponent(draftId)}/cancel`,
+      {
+        method: "POST",
+        token,
+      },
+    );
+    return data.draft;
   },
 
   async listMemories(token: string): Promise<UserMemory[]> {

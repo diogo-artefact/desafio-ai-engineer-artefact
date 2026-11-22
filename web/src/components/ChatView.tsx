@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 
-import type { AuthUser, ChatMessage } from "../types/api";
+import type { AuthUser, ChatMessage, OrderDraft } from "../types/api";
 import { ChatComposer } from "./ChatComposer";
 import { ErrorCallout } from "./ErrorCallout";
 import { MarkdownMessage } from "./MarkdownMessage";
+import { OrderDraftCard } from "./OrderDraftCard";
 import { TraceSteps, traceEntriesToSteps, type DisplayTraceStep } from "./TraceSteps";
 
 export interface ChatTurnError {
@@ -16,6 +17,9 @@ interface ChatViewProps {
   user: AuthUser;
   serviceReady: boolean;
   messages: ChatMessage[];
+  orderDrafts: OrderDraft[];
+  draftBusyId: string | null;
+  draftErrors: Record<string, string>;
   loadingSession: boolean;
   streaming: boolean;
   streamingText: string;
@@ -29,6 +33,9 @@ interface ChatViewProps {
   onRetryError: () => void;
   onEditError: () => void;
   onRetryMessage: (prompt: string) => void;
+  onConfirmOrderDraft: (draftId: string) => void;
+  onCancelOrderDraft: (draftId: string) => void;
+  onDeliveryDue: () => void;
   onOpenStoreInfo: () => void;
   onOpenSettings: () => void;
 }
@@ -77,6 +84,9 @@ export function ChatView({
   user,
   serviceReady,
   messages,
+  orderDrafts,
+  draftBusyId,
+  draftErrors,
   loadingSession,
   streaming,
   streamingText,
@@ -90,6 +100,9 @@ export function ChatView({
   onRetryError,
   onEditError,
   onRetryMessage,
+  onConfirmOrderDraft,
+  onCancelOrderDraft,
+  onDeliveryDue,
   onOpenStoreInfo,
   onOpenSettings,
 }: ChatViewProps) {
@@ -97,7 +110,7 @@ export function ChatView({
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages.length, streamingText, liveSteps.length, chatError]);
+  }, [messages.length, orderDrafts.length, streamingText, liveSteps.length, chatError]);
 
   if (user.role === "customer" && !serviceReady) {
     return (
@@ -191,6 +204,9 @@ export function ChatView({
     );
   }
 
+  const draftsById = new Map(orderDrafts.map((item) => [item.draft_id, item]));
+  const renderedDraftIds = new Set<string>();
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <main className="flex min-h-0 flex-1 flex-col items-center overflow-y-auto px-4 py-6 md:px-8 md:py-8">
@@ -211,11 +227,32 @@ export function ChatView({
             const previousUserMessage = [...messages.slice(0, index)]
               .reverse()
               .find((item) => item.role === "user");
+            const attachedDrafts: OrderDraft[] = [];
+            for (const entry of message.trace) {
+              if (entry.type === "tool" && entry.draft_id) {
+                const match = draftsById.get(entry.draft_id);
+                if (match && !renderedDraftIds.has(match.draft_id)) {
+                  renderedDraftIds.add(match.draft_id);
+                  attachedDrafts.push(match);
+                }
+              }
+            }
 
             return (
               <article key={`${message.id}-${index}`} className="flex flex-col gap-4">
                 {steps.length > 0 && <TraceSteps steps={steps} />}
                 <MarkdownMessage content={message.content} />
+                {attachedDrafts.map((item) => (
+                  <OrderDraftCard
+                    key={item.draft_id}
+                    draft={item}
+                    busy={draftBusyId === item.draft_id}
+                    error={draftErrors[item.draft_id]}
+                    onConfirm={onConfirmOrderDraft}
+                    onCancel={onCancelOrderDraft}
+                    onDeliveryDue={onDeliveryDue}
+                  />
+                ))}
                 <div className="flex items-center gap-4 pt-1">
                   <CopyAction text={message.content} />
                   {previousUserMessage && !streaming && (
@@ -242,6 +279,20 @@ export function ChatView({
               )}
             </div>
           )}
+
+          {orderDrafts
+            .filter((item) => !renderedDraftIds.has(item.draft_id))
+            .map((item) => (
+              <OrderDraftCard
+                key={item.draft_id}
+                draft={item}
+                busy={draftBusyId === item.draft_id}
+                error={draftErrors[item.draft_id]}
+                onConfirm={onConfirmOrderDraft}
+                onCancel={onCancelOrderDraft}
+                onDeliveryDue={onDeliveryDue}
+              />
+            ))}
 
           {chatError && (
             <ErrorCallout

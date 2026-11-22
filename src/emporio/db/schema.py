@@ -229,6 +229,43 @@ class UserPreferenceRow(Base):
     updated_at: Mapped[str] = mapped_column(String(64), nullable=False)
 
 
+class OrderDraftRow(Base):
+    __tablename__ = "order_drafts"
+
+    draft_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("sessions.session_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    product_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    product_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    unit_price_brl: Mapped[float] = mapped_column(Float, nullable=False)
+    discount_percent: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    subtotal_brl: Mapped[float] = mapped_column(Float, nullable=False)
+    shipping_brl: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    shipping_note: Mapped[str] = mapped_column(String(240), nullable=False, default="")
+    total_brl: Mapped[float] = mapped_column(Float, nullable=False)
+    payment_method: Mapped[str] = mapped_column(String(64), nullable=False)
+    payment_label: Mapped[str] = mapped_column(String(160), nullable=False)
+    city: Mapped[str] = mapped_column(String(120), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, index=True)
+    order_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    tracking_code: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    created_at: Mapped[str] = mapped_column(String(64), nullable=False)
+    confirmed_at: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    deliver_at: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    delivered_at: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
 def create_db_engine(db_path: Path | str) -> Engine:
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from datetime import datetime
 from typing import Any, Protocol
 
 from emporio.auth import AuthenticatedUser, UserRole
@@ -7,6 +9,7 @@ from emporio.domain.models import (
     GuardrailDecision,
     InstructionValidationResult,
     KnowledgeStatus,
+    OrderDraft,
     OrderInfo,
     PolicyChunkHit,
     ProductDetail,
@@ -38,6 +41,54 @@ class CatalogRepository(Protocol):
 
 class OrderRepository(Protocol):
     def verify_and_get_order(self, order_id: int, contact: str) -> OrderInfo | None: ...
+
+    def count_customers_by_email(self, email: str) -> int: ...
+
+    def list_orders_for_email(self, email: str) -> list[OrderInfo]: ...
+
+    def match_customer_email_and_phone(self, email: str, phone: str) -> bool: ...
+
+    def list_orders_for_email_and_phone(self, email: str, phone: str) -> list[OrderInfo]: ...
+
+    def get_customer_city_by_email(self, email: str) -> str | None: ...
+
+
+class OrderDraftRepository(Protocol):
+    def create_order_draft(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        product_id: int,
+        product_name: str,
+        quantity: int,
+        unit_price_brl: float,
+        discount_percent: float,
+        subtotal_brl: float,
+        shipping_brl: float,
+        shipping_note: str,
+        total_brl: float,
+        payment_method: str,
+        payment_label: str,
+        city: str,
+    ) -> OrderDraft: ...
+
+    def list_session_order_drafts(self, session_id: str) -> list[OrderDraft]: ...
+
+    def get_order_draft(
+        self, draft_id: str, user_id: str | None = None
+    ) -> OrderDraft | None: ...
+
+    def confirm_order_draft(
+        self,
+        draft_id: str,
+        user: AuthenticatedUser,
+        auto_delivery_seconds: int = 300,
+    ) -> tuple[OrderDraft, dict[str, Any]]: ...
+
+    def cancel_order_draft(self, draft_id: str, user_id: str) -> OrderDraft: ...
+
+    def finalize_due_deliveries(self, now: datetime | None = None) -> list[OrderDraft]: ...
 
 
 class PolicyRetriever(Protocol):
@@ -143,6 +194,11 @@ class UserRepository(Protocol):
         password_hash: str,
         role: UserRole,
     ) -> None: ...
+
+    def sync_customer_seed_users(
+        self,
+        password_factory: Callable[[], str],
+    ) -> int: ...
 
 
 class SessionRepository(Protocol):

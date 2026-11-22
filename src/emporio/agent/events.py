@@ -40,7 +40,7 @@ TOOL_REGISTRY: tuple[ToolMeta, ...] = (
     ToolMeta(
         tool_id="lookup_order",
         label="Consulta de pedidos (LGPD)",
-        description="Verifica status, rastreamento e elegibilidade de devolução em 2 fatores",
+        description="Verifica status, rastreamento e elegibilidade de devolução com gateways LGPD",
         running_label="Verificando pedido (LGPD)",
         done_label="Verificou pedido (LGPD)",
     ),
@@ -50,6 +50,13 @@ TOOL_REGISTRY: tuple[ToolMeta, ...] = (
         description="Consulta regras de troca, garantia, expediente e privacidade",
         running_label="Consultando manual de políticas",
         done_label="Consultou manual de políticas",
+    ),
+    ToolMeta(
+        tool_id="prepare_order_draft",
+        label="Pedidos por chat",
+        description="Monta card de confirmação de pedido com preço validado, estoque e frete",
+        running_label="Preparando pedido",
+        done_label="Preparou pedido",
     ),
 )
 
@@ -141,6 +148,12 @@ class SessionTitleEvent(BaseModel):
     title: str
 
 
+class OrderDraftEvent(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    type: Literal["order_draft"] = "order_draft"
+    draft: dict[str, Any]
+
+
 class TurnDoneEvent(BaseModel):
     model_config = ConfigDict(frozen=True)
     type: Literal["done"] = "done"
@@ -156,5 +169,6 @@ AgentEvent = (
     | ToolEndEvent
     | TextDeltaEvent
     | SessionTitleEvent
+    | OrderDraftEvent
     | TurnDoneEvent
 )

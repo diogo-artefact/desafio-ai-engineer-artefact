@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import uuid
 import zipfile
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated, Any
@@ -77,8 +79,9 @@ STORE_PROFILE: dict[str, Any] = {
         {
             "title": "Privacidade (LGPD)",
             "detail": (
-                "Consultas de pedidos exigem confirmação do número do pedido junto ao e-mail "
-                "ou telefone cadastrado."
+                "Na web autenticada, cada conta consulta apenas seus próprios pedidos (com "
+                "confirmação por telefone para e-mails compartilhados). Em canais sem login, "
+                "como WhatsApp, a consulta exige número do pedido junto ao e-mail ou telefone."
             ),
         },
     ],
@@ -209,7 +212,28 @@ def require_admin(
 
 def create_app(container: AppContainer | None = None) -> FastAPI:
     deps = container or AppContainer.from_settings()
-    api = FastAPI(title="Empório da Música API", version="0.1.0")
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        async def _delivery_watcher() -> None:
+            while True:
+                try:
+                    deps.repo.finalize_due_deliveries()
+                except Exception:
+                    pass
+                await asyncio.sleep(10)
+
+        watcher = asyncio.create_task(_delivery_watcher())
+        try:
+            yield
+        finally:
+            watcher.cancel()
+            try:
+                await watcher
+            except asyncio.CancelledError:
+                pass
+
+    api = FastAPI(title="Empório da Música API", version="0.1.0", lifespan=lifespan)
     api.add_middleware(
         CORSMiddleware,
         allow_origins=deps.settings.cors_origins_list,
@@ -289,11 +313,19 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
                     "Envie os 6 arquivos CSV operacionais ou um .zip contendo os CSVs."
                 )
             report = ingest_store_csvs(csv_map, db_path=deps.db_path)
+            seeded_customer_users = (
+                deps.repo.sync_customer_seed_users(
+                    lambda: hash_password(deps.settings.seed_user_password)
+                )
+                if deps.settings.seed_user_password
+                else 0
+            )
         except (ValueError, KeyError, UnicodeDecodeError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         return {
             "report": asdict(report),
+            "seeded_customer_users": seeded_customer_users,
             "knowledge": deps.repo.get_knowledge_status().model_dump(),
         }
 
@@ -349,6 +381,7 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
         session_id: str,
         user: Annotated[AuthenticatedUser, Depends(require_user)],
     ) -> dict[str, Any]:
+        deps.repo.finalize_due_deliveries()
         match = deps.repo.get_session(session_id, user_id=user.user_id)
         if match is None:
             raise HTTPException(status_code=404, detail="Conversa não encontrada.")
@@ -356,10 +389,48 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
             {**msg, "trace": _filter_trace_for_role(msg.get("trace", []), user.role)}
             for msg in deps.repo.get_messages(session_id)
         ]
+        order_drafts = [
+            draft.model_dump() for draft in deps.repo.list_session_order_drafts(session_id)
+        ]
         return {
             "session": match,
             "messages": messages,
+            "order_drafts": order_drafts,
         }
+
+    @api.post("/api/orders/drafts/{draft_id}/confirm")
+    def confirm_order_draft(
+        draft_id: str,
+        user: Annotated[AuthenticatedUser, Depends(require_user)],
+    ) -> dict[str, Any]:
+        deps.repo.finalize_due_deliveries()
+        try:
+            draft, message = deps.repo.confirm_order_draft(
+                draft_id,
+                user,
+                auto_delivery_seconds=deps.settings.order_auto_delivery_seconds,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "draft": draft.model_dump(),
+            "message": message,
+        }
+
+    @api.post("/api/orders/drafts/{draft_id}/cancel")
+    def cancel_order_draft(
+        draft_id: str,
+        user: Annotated[AuthenticatedUser, Depends(require_user)],
+    ) -> dict[str, Any]:
+        try:
+            draft = deps.repo.cancel_order_draft(draft_id, user.user_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"draft": draft.model_dump()}
 
     @api.delete("/api/sessions/{session_id}", status_code=204)
     def delete_session(
@@ -510,6 +581,7 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
                 detail="Nosso atendimento virtual não está disponível no momento.",
             )
 
+        deps.repo.finalize_due_deliveries()
         requested_sid = (body.session_id or "").strip()
         if requested_sid:
             existing = deps.repo.get_session(requested_sid)
@@ -528,6 +600,8 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
                     enabled_tools=enabled,
                     user_id=user.user_id,
                     user_role=user.role,
+                    user_name=user.name,
+                    user_email=user.email,
                 ):
                     filtered = _filter_event_for_role(event.model_dump(), user.role)
                     if filtered is not None:

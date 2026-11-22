@@ -6,6 +6,9 @@ from fastapi.testclient import TestClient
 from pydantic_ai.models.function import FunctionModel
 
 from emporio.api import AppContainer, create_app
+from emporio.etl.loader import ingest_store_csvs
+
+RAW_DIR = Path("data/raw")
 
 
 def _make_client(tmp_path: Path) -> TestClient:
@@ -155,3 +158,75 @@ def test_admin_gemini4_model_selection_and_guard(tmp_path: Path) -> None:
     assert client.get("/api/models", headers=admin_headers).json()["active_model"] == (
         "google:gemini-4-neon"
     )
+
+
+def test_csv_upload_and_startup_seed_all_unique_customers(tmp_path: Path) -> None:
+    client = _make_client(tmp_path)
+    admin_token = client.post(
+        "/api/auth/login",
+        json={"email": "admin@admin.com", "password": "admin123"},
+    ).json()["token"]
+    admin_headers = {"Authorization": f"Bearer {admin_token}"}
+
+    custom_signup = client.post(
+        "/api/auth/register",
+        json={
+            "name": "Lucas Custom",
+            "email": "lucas.mendes@jmail.com",
+            "password": "minha-senha-custom",
+        },
+    )
+    assert custom_signup.status_code == 201
+
+    csv_files = [
+        ("files", (p.name, p.read_bytes(), "text/csv")) for p in sorted(RAW_DIR.glob("*.csv"))
+    ]
+    first_upload = client.post("/api/knowledge/csvs", headers=admin_headers, files=csv_files)
+    assert first_upload.status_code == 200
+    assert first_upload.json()["seeded_customer_users"] == 48
+
+    leticia_login = client.post(
+        "/api/auth/login",
+        json={"email": "leticia.rocha@jmail.com", "password": "user123"},
+    )
+    assert leticia_login.status_code == 200
+    assert leticia_login.json()["user"]["name"] == "Letícia Gonçalves Rocha"
+    assert leticia_login.json()["user"]["role"] == "customer"
+
+    bruno_login = client.post(
+        "/api/auth/login",
+        json={"email": "bruno.martins@jmail.com", "password": "user123"},
+    )
+    assert bruno_login.status_code == 200
+    assert bruno_login.json()["user"]["name"] == "Bruno Carvalho Martins"
+
+    preserved_custom = client.post(
+        "/api/auth/login",
+        json={"email": "lucas.mendes@jmail.com", "password": "minha-senha-custom"},
+    )
+    assert preserved_custom.status_code == 200
+    assert preserved_custom.json()["user"]["name"] == "Lucas Custom"
+
+    second_upload = client.post("/api/knowledge/csvs", headers=admin_headers, files=csv_files)
+    assert second_upload.status_code == 200
+    assert second_upload.json()["seeded_customer_users"] == 0
+
+    preloaded_db = tmp_path / "preloaded.db"
+    raw_map = {p.name: p.read_bytes() for p in sorted(RAW_DIR.glob("*.csv"))}
+    ingest_store_csvs(raw_map, db_path=preloaded_db)
+
+    async def noop_stream(messages, info):
+        yield "ok"
+
+    booted = AppContainer.build(
+        db_path=preloaded_db,
+        embedder=None,
+        model=FunctionModel(stream_function=noop_stream),
+    )
+    booted_client = TestClient(create_app(booted))
+    pedro_login = booted_client.post(
+        "/api/auth/login",
+        json={"email": "pedro.oliveira@jmail.com", "password": "user123"},
+    )
+    assert pedro_login.status_code == 200
+    assert pedro_login.json()["user"]["name"] == "Pedro Henrique Oliveira"

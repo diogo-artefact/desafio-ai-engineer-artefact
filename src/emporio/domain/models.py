@@ -8,6 +8,7 @@ ProductStatus = Literal["active", "discontinued", "coming_soon"]
 RetrievalMode = Literal["vector", "keyword"]
 KnowledgeSourceKey = Literal["store_csvs", "policy_pdf"]
 GuardrailAction = Literal["allow", "block_adversarial", "block_accessories", "block_off_topic"]
+OrderDraftStatus = Literal["pending", "confirmed", "cancelled", "delivered"]
 
 
 class PromotionInfo(BaseModel):
@@ -196,3 +197,44 @@ class InstructionValidationResult(BaseModel):
     override_probability: float = 0.0
     model: str = ""
     latency_ms: int = 0
+
+
+class OrderPricing(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    unit_price_brl: float
+    discount_percent: float
+    subtotal_brl: float
+    shipping_brl: float
+    shipping_note: str
+    total_brl: float
+    payment_method: str
+    payment_label: str
+    city: str
+
+
+class OrderDraft(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    draft_id: str
+    session_id: str
+    user_id: str
+    product_id: int
+    product_name: str
+    quantity: int
+    unit_price_brl: float
+    discount_percent: float
+    subtotal_brl: float
+    shipping_brl: float
+    shipping_note: str
+    total_brl: float
+    payment_method: str
+    payment_label: str
+    city: str
+    status: OrderDraftStatus
+    order_id: int | None = None
+    tracking_code: str = ""
+    created_at: str
+    confirmed_at: str | None = None
+    deliver_at: str | None = None
+    delivered_at: str | None = None

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import re
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from emporio.domain.models import (
     InstallmentOption,
     OrderInfo,
+    OrderPricing,
     PaymentSimulation,
     ReturnEligibility,
     ShippingQuote,
@@ -264,4 +266,110 @@ def check_store_hours(now: datetime | None = None) -> StoreHoursStatus:
         weekday_pt=WEEKDAYS_PT[weekday],
         schedule_summary=schedule_summary,
         next_opening=next_opening,
+    )
+
+
+def _format_brl(value: float) -> str:
+    return f"R$ {value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def build_order_pricing(
+    *,
+    list_price_brl: float,
+    quantity: int,
+    active_discount_percent: float,
+    payment_method_raw: str,
+    city: str,
+    large_instrument: bool = False,
+) -> OrderPricing:
+    if quantity < 1 or quantity > 10:
+        raise ValueError("A quantidade deve estar entre 1 e 10 unidades.")
+
+    list_subtotal = round(list_price_brl * quantity, 2)
+    sim = simulate_payment(list_subtotal, active_discount_percent=active_discount_percent)
+
+    norm_pay = normalize_text(payment_method_raw or "pix")
+    clean_city = city.strip() or "Campo Grande"
+
+    is_combined = "combinad" in norm_pay or (
+        "pix" in norm_pay and ("cartao" in norm_pay or "credit" in norm_pay)
+    )
+    if is_combined:
+        if not sim.allows_combined_payment:
+            raise ValueError(
+                "A combinação de formas de pagamento está disponível apenas para pedidos acima "
+                "de R$ 2.000,00."
+            )
+        payment_code = "combined_pix_credit"
+        payment_label = "Combinação (entrada no PIX + saldo no cartão)"
+        subtotal_brl = sim.effective_price_brl
+        discount_pct = active_discount_percent
+    elif "pix" in norm_pay:
+        payment_code = "pix"
+        subtotal_brl = sim.pix_price_brl
+        discount_pct = 5.0 if sim.pix_discount_applied else active_discount_percent
+        payment_label = (
+            "PIX à vista (5% de desconto)"
+            if sim.pix_discount_applied
+            else f"PIX à vista (promoção de {active_discount_percent:g}% já aplicada)"
+        )
+    elif "boleto" in norm_pay:
+        payment_code = "boleto"
+        payment_label = "Boleto à vista"
+        subtotal_brl = sim.effective_price_brl
+        discount_pct = active_discount_percent
+    elif "debit" in norm_pay:
+        payment_code = "debit"
+        payment_label = "Cartão de débito"
+        subtotal_brl = sim.effective_price_brl
+        discount_pct = active_discount_percent
+    else:
+        match = re.search(r"(\d{1,2})", norm_pay)
+        installments = int(match.group(1)) if match else 1
+        if installments < 1 or installments > 12:
+            raise ValueError("O parcelamento no cartão aceita de 1x até 12x sem juros.")
+        option = next(
+            (opt for opt in sim.installment_options if opt.installments == installments),
+            None,
+        )
+        if option is None:
+            raise ValueError(
+                f"Para este valor ({_format_brl(sim.effective_price_brl)}), o parcelamento "
+                f"sem juros vai até {sim.max_installments}x."
+            )
+        payment_code = f"credit_{installments}x"
+        installment_fmt = _format_brl(option.installment_value_brl)
+        payment_label = (
+            "Cartão de crédito à vista"
+            if installments == 1
+            else f"Cartão em {installments}x sem juros de {installment_fmt}"
+        )
+        subtotal_brl = sim.effective_price_brl
+        discount_pct = active_discount_percent
+
+    shipping = calculate_shipping(clean_city, subtotal_brl, large_instrument=large_instrument)
+    if shipping.is_campo_grande_metro:
+        shipping_brl = float(shipping.fixed_cost_brl or 0.0)
+        if shipping.free_shipping:
+            shipping_note = f"{shipping.city} · Frete grátis ({shipping.delivery_window})"
+        else:
+            shipping_note = (
+                f"{shipping.city} · Motoboy {_format_brl(shipping_brl)} "
+                f"({shipping.delivery_window})"
+            )
+    else:
+        shipping_brl = 0.0
+        shipping_note = f"{shipping.city} · Correios/Jadlog (frete calculado pelo CEP no envio)"
+
+    total_brl = round(subtotal_brl + shipping_brl, 2)
+    return OrderPricing(
+        unit_price_brl=round(list_price_brl, 2),
+        discount_percent=discount_pct,
+        subtotal_brl=subtotal_brl,
+        shipping_brl=shipping_brl,
+        shipping_note=shipping_note,
+        total_brl=total_brl,
+        payment_method=payment_code,
+        payment_label=payment_label,
+        city=shipping.city,
     )

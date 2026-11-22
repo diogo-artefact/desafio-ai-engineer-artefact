@@ -23,7 +23,7 @@ const DEFAULT_POLICIES = [
   {
     title: "Devoluções e LGPD",
     detail:
-      "Arrependimento em 7 dias corridos; consulta de pedidos com verificação em 2 fatores.",
+      "Arrependimento em 7 dias corridos; pedidos protegidos por titularidade da conta (ou 2 fatores fora do login).",
   },
 ];
 
