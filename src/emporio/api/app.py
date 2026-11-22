@@ -434,6 +434,7 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
                     message=clean_message,
                     enabled_tools=enabled,
                     user_id=user.user_id,
+                    user_role=user.role,
                 ):
                     yield _sse_line(event.model_dump())
             except (

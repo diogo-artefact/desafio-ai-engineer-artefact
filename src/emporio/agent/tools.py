@@ -7,6 +7,7 @@ from typing import Any
 from pydantic_ai import Agent, RunContext, ToolDefinition
 
 from emporio.agent.events import ALL_TOOL_IDS
+from emporio.auth import UserRole
 from emporio.domain.rules import (
     calculate_shipping,
     check_store_hours,
@@ -29,6 +30,7 @@ class AgentDeps:
     policies: PolicyRetriever
     knowledge: KnowledgeRepository
     enabled_tools: frozenset[str] = field(default_factory=lambda: ALL_TOOL_IDS)
+    user_role: UserRole = "customer"
     reference_time: datetime | None = None
 
 
@@ -44,24 +46,42 @@ def _prepare_if_enabled(tool_id: str):
     return _prepare
 
 
-def _missing_csvs_payload() -> dict[str, Any]:
+def _missing_csvs_payload(user_role: UserRole) -> dict[str, Any]:
+    if user_role == "admin":
+        return {
+            "error": "base_not_loaded",
+            "missing": "store_csvs",
+            "message": (
+                "A base operacional da loja (CSVs) ainda não foi carregada. "
+                "Envie os arquivos CSV em Ajustes > Base de dados."
+            ),
+        }
     return {
         "error": "base_not_loaded",
-        "missing": "store_csvs",
         "message": (
-            "A base operacional da loja (CSVs) ainda não foi carregada. "
-            "Peça ao usuário para enviar os arquivos CSV em Ajustes > Base de dados."
+            "Esta consulta está temporariamente indisponível. Informe apenas que não é "
+            "possível verificar essa informação agora e oriente contato com a equipe pelo "
+            "telefone (67) 3341-4444 ou pelo e-mail contato@emporiodamusica.com.br."
         ),
     }
 
 
-def _missing_pdf_payload() -> dict[str, Any]:
+def _missing_pdf_payload(user_role: UserRole) -> dict[str, Any]:
+    if user_role == "admin":
+        return {
+            "error": "base_not_loaded",
+            "missing": "policy_pdf",
+            "message": (
+                "O manual de políticas (PDF) ainda não foi carregado. "
+                "Envie o PDF em Ajustes > Base de dados."
+            ),
+        }
     return {
         "error": "base_not_loaded",
-        "missing": "policy_pdf",
         "message": (
-            "O manual de políticas (PDF) ainda não foi carregado. "
-            "Peça ao usuário para enviar o PDF em Ajustes > Base de dados."
+            "Esta consulta está temporariamente indisponível. Informe apenas que não é "
+            "possível verificar essa informação agora e oriente contato com a equipe pelo "
+            "telefone (67) 3341-4444 ou pelo e-mail contato@emporiodamusica.com.br."
         ),
     }
 
@@ -81,7 +101,7 @@ def register_tools(agent: Agent[AgentDeps, str]) -> None:
         """Busca instrumentos no catálogo com filtros de categoria, preço, estoque e promoções."""
         status = ctx.deps.knowledge.get_knowledge_status()
         if not status.csvs.loaded:
-            return _missing_csvs_payload()
+            return _missing_csvs_payload(ctx.deps.user_role)
 
         items = ctx.deps.catalog.search_products(
             query=query,
@@ -106,7 +126,7 @@ def register_tools(agent: Agent[AgentDeps, str]) -> None:
         """Retorna ficha completa, estoque, promoções ativas/vencidas, simulação e alternativas."""
         status = ctx.deps.knowledge.get_knowledge_status()
         if not status.csvs.loaded:
-            return _missing_csvs_payload()
+            return _missing_csvs_payload(ctx.deps.user_role)
 
         detail = ctx.deps.catalog.get_product_detail(product_id_or_name)
         if detail is None:
@@ -151,7 +171,7 @@ def register_tools(agent: Agent[AgentDeps, str]) -> None:
         if product_id_or_name:
             status = ctx.deps.knowledge.get_knowledge_status()
             if not status.csvs.loaded:
-                return _missing_csvs_payload()
+                return _missing_csvs_payload(ctx.deps.user_role)
             detail = ctx.deps.catalog.get_product_detail(product_id_or_name)
             if detail is None:
                 return {
@@ -183,7 +203,7 @@ def register_tools(agent: Agent[AgentDeps, str]) -> None:
         """Consulta pedido mediante verificação em 2 fatores (order_id + e-mail ou telefone)."""
         status = ctx.deps.knowledge.get_knowledge_status()
         if not status.csvs.loaded:
-            return _missing_csvs_payload()
+            return _missing_csvs_payload(ctx.deps.user_role)
 
         order = ctx.deps.orders.verify_and_get_order(order_id=order_id, contact=contact)
         if order is None:
@@ -212,7 +232,7 @@ def register_tools(agent: Agent[AgentDeps, str]) -> None:
         """Consulta o manual de políticas por busca vetorial ou número da seção, mais expediente."""
         status = ctx.deps.knowledge.get_knowledge_status()
         if not status.pdf.loaded:
-            return _missing_pdf_payload()
+            return _missing_pdf_payload(ctx.deps.user_role)
 
         if section_number:
             hits = ctx.deps.policies.get_policy_section(section_number)

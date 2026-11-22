@@ -40,6 +40,7 @@ from emporio.agent.events import (
     TurnDoneEvent,
 )
 from emporio.agent.tools import AgentDeps, register_tools
+from emporio.auth import UserRole
 from emporio.config import get_settings
 from emporio.ports import (
     CatalogRepository,
@@ -61,8 +62,9 @@ SYSTEM_PROMPT = (
     "pedirem acessórios, informe isso com clareza e sugira lojas parceiras ou especializadas.\n"
     "3. Fatos verificados: nunca invente preços, estoques, especificações, promoções, prazos ou "
     "dados de pedido. Sempre consulte as ferramentas disponíveis antes de responder. Se uma "
-    "ferramenta estiver desativada ou a base ainda não tiver sido carregada, diga claramente que "
-    "essa consulta está indisponível no momento.\n"
+    "consulta estiver indisponível, siga exatamente a orientação retornada pela ferramenta e "
+    "nunca mencione arquivos internos, CSV, PDF, base de dados ou telas administrativas para "
+    "clientes.\n"
     "4. Estoque e status: se um produto estiver esgotado ou descontinuado, informe com "
     "transparência e ofereça alternativas semelhantes disponíveis retornadas pelas ferramentas. "
     "Nunca ofereça item coming_soon para entrega imediata.\n"
@@ -110,7 +112,7 @@ def _format_brl(value: float) -> str:
 def _summarize_tool_result(tool_name: str, result: Any) -> str:
     if isinstance(result, dict):
         if result.get("error") == "base_not_loaded":
-            return "Base ainda não carregada"
+            return "Consulta indisponível no momento"
         if tool_name == "search_catalog":
             return f"{result.get('count', 0)} instrumento(s) encontrado(s)"
         if tool_name == "get_product_details":
@@ -401,6 +403,7 @@ class ConversationService:
         message: str,
         enabled_tools: frozenset[str] | None = None,
         user_id: str | None = None,
+        user_role: UserRole = "customer",
     ) -> AsyncIterator[AgentEvent]:
         history = self._ensure_session(session_id, message, user_id=user_id)
         self._sessions.append_message(session_id, "user", message)
@@ -411,6 +414,7 @@ class ConversationService:
             policies=self._policies,
             knowledge=self._knowledge,
             enabled_tools=enabled_tools if enabled_tools is not None else ALL_TOOL_IDS,
+            user_role=user_role,
         )
         model_override = (
             self.resolve_active_model() if self._agent.allows_runtime_model_override else None
@@ -430,6 +434,7 @@ class ConversationService:
         message: str,
         enabled_tools: frozenset[str] | None = None,
         user_id: str | None = None,
+        user_role: UserRole = "customer",
     ) -> TurnDoneEvent:
         done: TurnDoneEvent | None = None
         async for event in self.stream_message(
@@ -437,6 +442,7 @@ class ConversationService:
             message,
             enabled_tools=enabled_tools,
             user_id=user_id,
+            user_role=user_role,
         ):
             if isinstance(event, TurnDoneEvent):
                 done = event

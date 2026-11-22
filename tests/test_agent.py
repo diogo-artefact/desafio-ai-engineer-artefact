@@ -162,15 +162,31 @@ async def test_lgpd_order_tool_and_empty_base_guardrails(tmp_path: Path) -> None
         yield "Envie os arquivos CSV primeiro."
 
     agent_empty = SupportAgent(model=FunctionModel(stream_function=call_catalog))
-    deps_empty = AgentDeps(
+    deps_customer = AgentDeps(
         catalog=empty_repo,
         orders=empty_repo,
         policies=empty_repo,
         knowledge=empty_repo,
+        user_role="customer",
     )
-    await agent_empty.reply("Quais violões têm?", [], deps_empty)
+    await agent_empty.reply("Quais violões têm?", [], deps_customer)
     assert empty_results[0]["error"] == "base_not_loaded"
-    assert empty_results[0]["missing"] == "store_csvs"
+    assert "missing" not in empty_results[0]
+    assert "Ajustes" not in empty_results[0]["message"]
+    assert "CSV" not in empty_results[0]["message"]
+    assert "(67) 3341-4444" in empty_results[0]["message"]
+
+    deps_admin = AgentDeps(
+        catalog=empty_repo,
+        orders=empty_repo,
+        policies=empty_repo,
+        knowledge=empty_repo,
+        user_role="admin",
+    )
+    await agent_empty.reply("Quais violões têm?", [], deps_admin)
+    assert empty_results[1]["error"] == "base_not_loaded"
+    assert empty_results[1]["missing"] == "store_csvs"
+    assert "Ajustes > Base de dados" in empty_results[1]["message"]
 
     loaded_repo = _loaded_repo(tmp_path)
     order_results: list[dict] = []
