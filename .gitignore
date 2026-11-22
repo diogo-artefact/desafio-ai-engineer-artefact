@@ -19,6 +19,7 @@ build/
 data/emporio.db
 data/emporio.db-shm
 data/emporio.db-wal
+evals/runs/
 
 # Frontend
 web/node_modules/

@@ -4,6 +4,7 @@ import json
 import os
 import time
 from collections.abc import AsyncIterator
+from datetime import datetime
 from typing import Any
 
 from pydantic_ai import Agent
@@ -119,7 +120,16 @@ def _summarize_tool_result(tool_name: str, result: Any) -> str:
             if not result.get("found"):
                 return "Produto não encontrado"
             prod = result.get("product", {})
-            return f"{prod.get('name', 'Produto')} · estoque {prod.get('stock_quantity', 0)}"
+            base = f"{prod.get('name', 'Produto')} · estoque {prod.get('stock_quantity', 0)}"
+            alts = result.get("alternatives_in_stock") or []
+            if alts:
+                alt_list = ", ".join(
+                    f"{a.get('name')} ({_format_brl(float(a.get('price_brl', 0)))}, "
+                    f"estoque {a.get('stock_quantity', 0)})"
+                    for a in alts
+                )
+                return f"{base} · alternativas: {alt_list}"
+            return base
         if tool_name == "simulate_payment_and_shipping":
             if result.get("found") is False:
                 return "Produto não encontrado"
@@ -404,6 +414,7 @@ class ConversationService:
         enabled_tools: frozenset[str] | None = None,
         user_id: str | None = None,
         user_role: UserRole = "customer",
+        reference_time: datetime | None = None,
     ) -> AsyncIterator[AgentEvent]:
         history = self._ensure_session(session_id, message, user_id=user_id)
         self._sessions.append_message(session_id, "user", message)
@@ -415,6 +426,7 @@ class ConversationService:
             knowledge=self._knowledge,
             enabled_tools=enabled_tools if enabled_tools is not None else ALL_TOOL_IDS,
             user_role=user_role,
+            reference_time=reference_time,
         )
         model_override = (
             self.resolve_active_model() if self._agent.allows_runtime_model_override else None
@@ -435,6 +447,7 @@ class ConversationService:
         enabled_tools: frozenset[str] | None = None,
         user_id: str | None = None,
         user_role: UserRole = "customer",
+        reference_time: datetime | None = None,
     ) -> TurnDoneEvent:
         done: TurnDoneEvent | None = None
         async for event in self.stream_message(
@@ -443,6 +456,7 @@ class ConversationService:
             enabled_tools=enabled_tools,
             user_id=user_id,
             user_role=user_role,
+            reference_time=reference_time,
         ):
             if isinstance(event, TurnDoneEvent):
                 done = event
