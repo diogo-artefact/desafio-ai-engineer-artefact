@@ -88,67 +88,93 @@ function LiveTimer({ startedAt }: { startedAt: number }) {
   );
 }
 
+function buildSummaryLabel(steps: DisplayTraceStep[]): string {
+  const runningStep = [...steps].reverse().find((step) => step.status === "running");
+  if (runningStep) {
+    return runningStep.label;
+  }
+
+  const thinkingCount = steps.filter((step) => step.type === "thinking").length;
+  const toolCount = steps.filter((step) => step.type === "tool").length;
+
+  if (thinkingCount > 0 && toolCount > 0) {
+    const suffix = toolCount === 1 ? "consulta" : "consultas";
+    return `Pensou · ${toolCount} ${suffix}`;
+  }
+  if (toolCount > 0) {
+    const suffix = toolCount === 1 ? "consulta" : "consultas";
+    return `${toolCount} ${suffix}`;
+  }
+  return "Pensou";
+}
+
 interface TraceStepsProps {
   steps: DisplayTraceStep[];
 }
 
 export function TraceSteps({ steps }: TraceStepsProps) {
-  const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>({});
+  const [open, setOpen] = useState(false);
 
   if (steps.length === 0) {
     return null;
   }
 
-  function toggleStep(stepId: string): void {
-    setExpandedIds((prev) => ({ ...prev, [stepId]: !prev[stepId] }));
-  }
+  const isRunning = steps.some((step) => step.status === "running");
+  const firstStartedAt = steps.find((step) => step.startedAt !== undefined)?.startedAt;
+  const totalDurationMs = steps.reduce((acc, step) => acc + (step.durationMs ?? 0), 0);
+  const totalDurationLabel = formatDuration(totalDurationMs);
+  const summaryLabel = buildSummaryLabel(steps);
 
   return (
-    <div className="flex flex-col gap-2">
-      {steps.map((step) => {
-        const hasDetails = step.detailLines.length > 0;
-        const expanded = Boolean(expandedIds[step.id]);
-        const durationLabel = formatDuration(step.durationMs);
+    <div className="flex flex-col gap-3">
+      <div className="flex items-center justify-between gap-4">
+        <button
+          type="button"
+          aria-expanded={open}
+          onClick={() => setOpen((prev) => !prev)}
+          className={`flex items-center gap-1.5 border-0 bg-transparent p-0 text-left text-[14px] leading-[140%] transition-colors ${
+            open
+              ? "font-medium text-[var(--color-ink-primary)]"
+              : "font-normal text-[var(--color-ink-secondary)] hover:text-[var(--color-ink-primary)]"
+          }`}
+        >
+          <span>{summaryLabel}</span>
+          <ChevronDown
+            size={14}
+            strokeWidth={1.5}
+            className={`shrink-0 text-[var(--color-ink-muted)] transition-transform ${
+              open ? "rotate-180" : ""
+            }`}
+          />
+        </button>
 
-        return (
-          <div key={step.id} className="flex flex-col gap-2">
-            <div className="flex items-center justify-between gap-4">
-              {hasDetails ? (
-                <button
-                  type="button"
-                  onClick={() => toggleStep(step.id)}
-                  className={`group flex items-center gap-1 border-0 bg-transparent p-0 text-left text-[14px] leading-[140%] transition-colors ${
-                    expanded
-                      ? "font-medium text-[var(--color-ink-primary)]"
-                      : "font-normal text-[var(--color-ink-secondary)] hover:text-[var(--color-ink-primary)]"
-                  }`}
-                >
-                  <span>{step.label}</span>
-                  <ChevronDown
-                    size={14}
-                    strokeWidth={1.5}
-                    className={`shrink-0 text-[var(--color-ink-muted)] transition-transform ${
-                      expanded ? "rotate-180 opacity-100" : "opacity-0 group-hover:opacity-100"
-                    }`}
-                  />
-                </button>
-              ) : (
-                <span className="text-[14px] font-normal leading-[140%] text-[var(--color-ink-secondary)]">
-                  {step.label}
-                </span>
-              )}
+        {isRunning && firstStartedAt !== undefined ? (
+          <LiveTimer startedAt={firstStartedAt} />
+        ) : totalDurationLabel ? (
+          <span className="tabular-nums text-[12px] leading-[140%] text-[var(--color-ink-muted)]">
+            {totalDurationLabel}
+          </span>
+        ) : null}
+      </div>
 
-              {step.status === "running" && step.startedAt !== undefined ? (
-                <LiveTimer startedAt={step.startedAt} />
-              ) : expanded && durationLabel ? (
-                <span className="tabular-nums text-[12px] leading-[140%] text-[var(--color-ink-muted)]">
-                  {durationLabel}
-                </span>
-              ) : null}
-            </div>
-
-            {expanded && hasDetails && (
-              <div className="flex flex-col gap-1 border-l-2 border-[var(--color-border-strong)] pl-4">
+      {open && (
+        <div className="flex flex-col gap-3 border-l-2 border-[var(--color-border-strong)] pl-4">
+          {steps.map((step) => {
+            const durationLabel = formatDuration(step.durationMs);
+            return (
+              <div key={step.id} className="flex flex-col gap-1">
+                <div className="flex items-baseline justify-between gap-3">
+                  <span className="text-[13px] font-medium leading-[140%] text-[var(--color-ink-primary)]">
+                    {step.label}
+                  </span>
+                  {step.status === "running" && step.startedAt !== undefined ? (
+                    <LiveTimer startedAt={step.startedAt} />
+                  ) : durationLabel ? (
+                    <span className="tabular-nums shrink-0 text-[12px] leading-[140%] text-[var(--color-ink-muted)]">
+                      {durationLabel}
+                    </span>
+                  ) : null}
+                </div>
                 {step.detailLines.map((line, index) => (
                   <p
                     key={`${step.id}-d-${index}`}
@@ -158,10 +184,10 @@ export function TraceSteps({ steps }: TraceStepsProps) {
                   </p>
                 ))}
               </div>
-            )}
-          </div>
-        );
-      })}
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
