@@ -139,4 +139,4 @@ def test_chat_rejects_unknown_tools_and_streams_upstream_503_as_error_event(
     events = _parse_sse(res.text)
     assert events[-1]["type"] == "error"
     assert events[-1]["status_code"] == 503
-    assert "HTTP 503" in events[-1]["message"]
+    assert "pico temporário" in events[-1]["message"]

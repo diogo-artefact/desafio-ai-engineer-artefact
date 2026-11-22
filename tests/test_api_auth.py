@@ -100,3 +100,58 @@ def test_role_guards_and_per_user_session_isolation(tmp_path: Path) -> None:
 
     assert client.get("/api/sessions", headers=other_headers).json()["sessions"] == []
     assert client.get(f"/api/sessions/{sid}", headers=other_headers).status_code == 404
+
+
+def test_admin_gemini4_model_selection_and_guard(tmp_path: Path) -> None:
+    client = _make_client(tmp_path)
+
+    user_token = client.post(
+        "/api/auth/login",
+        json={"email": "user@user.com", "password": "user123"},
+    ).json()["token"]
+    user_headers = {"Authorization": f"Bearer {user_token}"}
+    assert client.get("/api/models", headers=user_headers).status_code == 403
+    assert (
+        client.put(
+            "/api/models",
+            headers=user_headers,
+            json={"model_id": "google:gemini-4-neon"},
+        ).status_code
+        == 403
+    )
+
+    admin_token = client.post(
+        "/api/auth/login",
+        json={"email": "admin@admin.com", "password": "admin123"},
+    ).json()["token"]
+    admin_headers = {"Authorization": f"Bearer {admin_token}"}
+
+    initial = client.get("/api/models", headers=admin_headers)
+    assert initial.status_code == 200
+    payload = initial.json()
+    model_ids = [item["model_id"] for item in payload["models"]]
+    assert model_ids == [
+        "google:gemini-4-hydrogen",
+        "google:gemini-4-neon",
+        "google:gemini-4-carbon",
+        "google:gemini-4-argon",
+    ]
+    assert payload["active_model"] == "google:gemini-4-hydrogen"
+
+    rejected = client.put(
+        "/api/models",
+        headers=admin_headers,
+        json={"model_id": "google:gemini-2.5-flash"},
+    )
+    assert rejected.status_code == 400
+
+    updated = client.put(
+        "/api/models",
+        headers=admin_headers,
+        json={"model_id": "google:gemini-4-neon"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["active_model"] == "google:gemini-4-neon"
+    assert client.get("/api/models", headers=admin_headers).json()["active_model"] == (
+        "google:gemini-4-neon"
+    )

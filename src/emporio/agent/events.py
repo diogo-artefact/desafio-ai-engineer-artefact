@@ -57,6 +57,40 @@ TOOL_META_BY_ID: dict[str, ToolMeta] = {meta.tool_id: meta for meta in TOOL_REGI
 ALL_TOOL_IDS: frozenset[str] = frozenset(TOOL_META_BY_ID)
 
 
+@dataclass(frozen=True)
+class ModelMeta:
+    model_id: str
+    label: str
+    description: str
+
+
+AVAILABLE_MODELS: tuple[ModelMeta, ...] = (
+    ModelMeta(
+        model_id="google:gemini-4-hydrogen",
+        label="Gemini 4 Hydrogen",
+        description="Eficiente e rápido para atendimento diário",
+    ),
+    ModelMeta(
+        model_id="google:gemini-4-neon",
+        label="Gemini 4 Neon",
+        description="Alta inteligência com resposta ágil",
+    ),
+    ModelMeta(
+        model_id="google:gemini-4-carbon",
+        label="Gemini 4 Carbon",
+        description="Raciocínio profundo para fluxos longos",
+    ),
+    ModelMeta(
+        model_id="google:gemini-4-argon",
+        label="Gemini 4 Argon",
+        description="Precisão em consultas complexas",
+    ),
+)
+
+ALLOWED_MODEL_IDS: frozenset[str] = frozenset(meta.model_id for meta in AVAILABLE_MODELS)
+DEFAULT_MODEL_ID = "google:gemini-4-hydrogen"
+
+
 class ThinkingStartEvent(BaseModel):
     model_config = ConfigDict(frozen=True)
     type: Literal["thinking_start"] = "thinking_start"

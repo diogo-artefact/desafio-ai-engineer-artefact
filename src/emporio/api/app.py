@@ -18,7 +18,12 @@ from pdfplumber.utils.exceptions import PdfminerException
 from pydantic import BaseModel, Field
 from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError, UnexpectedModelBehavior
 
-from emporio.agent import ALL_TOOL_IDS, TOOL_REGISTRY
+from emporio.agent import (
+    ALL_TOOL_IDS,
+    ALLOWED_MODEL_IDS,
+    AVAILABLE_MODELS,
+    TOOL_REGISTRY,
+)
 from emporio.api.container import AppContainer
 from emporio.auth import (
     AuthenticatedUser,
@@ -100,6 +105,10 @@ class ChatRequest(BaseModel):
     enabled_tools: list[str] | None = None
 
 
+class UpdateModelRequest(BaseModel):
+    model_id: str = Field(min_length=1)
+
+
 def _sse_line(payload: dict[str, Any]) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
@@ -109,10 +118,7 @@ def _error_event_from(exc: Exception) -> dict[str, Any]:
     if isinstance(status_code, int) and status_code == 429:
         message = "Limite temporário da API do modelo atingido. Tente novamente em instantes."
     elif isinstance(status_code, int) and status_code >= 500:
-        message = (
-            f"O serviço do modelo está temporariamente indisponível (HTTP {status_code}). "
-            "Sua mensagem foi preservada."
-        )
+        message = "O servidor passou por um pico temporário. Tente novamente em instantes."
     else:
         message = "Não foi possível concluir a consulta ao modelo agora. Tente novamente."
     return {
@@ -346,6 +352,39 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
                 for meta in TOOL_REGISTRY
             ]
         }
+
+    def _models_payload() -> dict[str, Any]:
+        return {
+            "active_model": deps.conversations.resolve_active_model(),
+            "models": [
+                {
+                    "model_id": meta.model_id,
+                    "label": meta.label,
+                    "description": meta.description,
+                }
+                for meta in AVAILABLE_MODELS
+            ],
+        }
+
+    @api.get("/api/models")
+    def list_models(
+        _admin: Annotated[AuthenticatedUser, Depends(require_admin)],
+    ) -> dict[str, Any]:
+        return _models_payload()
+
+    @api.put("/api/models")
+    def update_model(
+        body: UpdateModelRequest,
+        _admin: Annotated[AuthenticatedUser, Depends(require_admin)],
+    ) -> dict[str, Any]:
+        chosen = body.model_id.strip()
+        if chosen not in ALLOWED_MODEL_IDS:
+            raise HTTPException(
+                status_code=400,
+                detail="Modelo indisponível. Escolha um dos modelos Gemini 4.",
+            )
+        deps.repo.set_setting("active_model", chosen)
+        return _models_payload()
 
     @api.post("/api/chat")
     async def chat_stream(

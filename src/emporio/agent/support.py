@@ -27,6 +27,8 @@ from pydantic_ai.models.google import GoogleModelSettings
 
 from emporio.agent.events import (
     ALL_TOOL_IDS,
+    ALLOWED_MODEL_IDS,
+    DEFAULT_MODEL_ID,
     TOOL_META_BY_ID,
     AgentEvent,
     TextDeltaEvent,
@@ -45,6 +47,7 @@ from emporio.ports import (
     OrderRepository,
     PolicyRetriever,
     SessionRepository,
+    SettingsRepository,
 )
 
 SYSTEM_PROMPT = (
@@ -172,7 +175,6 @@ class SupportAgent:
             os.environ["GEMINI_API_KEY"] = settings.gemini_api_key
 
         self._model = model if model is not None else settings.llm_model
-        self._is_google = isinstance(self._model, str) and self._model.startswith("google:")
         self._agent: Agent[AgentDeps, str] = Agent(
             self._model,
             deps_type=AgentDeps,
@@ -180,18 +182,29 @@ class SupportAgent:
         )
         register_tools(self._agent)
 
+    @property
+    def allows_runtime_model_override(self) -> bool:
+        return isinstance(self._model, str)
+
     async def stream_turn(
         self,
         message: str,
         history: list[dict[str, Any]],
         deps: AgentDeps,
+        model_override: str | None = None,
     ) -> AsyncIterator[AgentEvent]:
+        active_model: str | Model = (
+            model_override
+            if model_override is not None and self.allows_runtime_model_override
+            else self._model
+        )
+        is_google = isinstance(active_model, str) and active_model.startswith("google:")
         model_settings = (
             GoogleModelSettings(
                 thinking="low",
                 google_thinking_config={"include_thoughts": True},
             )
-            if self._is_google
+            if is_google
             else None
         )
         message_history = _history_to_messages(history)
@@ -205,6 +218,7 @@ class SupportAgent:
             message,
             deps=deps,
             message_history=message_history,
+            model=active_model if active_model != self._model else None,
             model_settings=model_settings,
         ) as run:
             async for node in run:
@@ -343,6 +357,8 @@ class ConversationService:
         policies: PolicyRetriever,
         knowledge: KnowledgeRepository,
         sessions: SessionRepository,
+        settings_repo: SettingsRepository | None = None,
+        default_model: str = DEFAULT_MODEL_ID,
     ) -> None:
         self._agent = agent
         self._catalog = catalog
@@ -350,6 +366,17 @@ class ConversationService:
         self._policies = policies
         self._knowledge = knowledge
         self._sessions = sessions
+        self._settings = settings_repo
+        self._default_model = (
+            default_model if default_model in ALLOWED_MODEL_IDS else DEFAULT_MODEL_ID
+        )
+
+    def resolve_active_model(self) -> str:
+        if self._settings is not None:
+            saved = self._settings.get_setting("active_model")
+            if saved in ALLOWED_MODEL_IDS:
+                return saved
+        return self._default_model
 
     def _ensure_session(
         self,
@@ -385,7 +412,12 @@ class ConversationService:
             knowledge=self._knowledge,
             enabled_tools=enabled_tools if enabled_tools is not None else ALL_TOOL_IDS,
         )
-        async for event in self._agent.stream_turn(message, history, deps):
+        model_override = (
+            self.resolve_active_model() if self._agent.allows_runtime_model_override else None
+        )
+        async for event in self._agent.stream_turn(
+            message, history, deps, model_override=model_override
+        ):
             if isinstance(event, TurnDoneEvent):
                 self._sessions.append_message(
                     session_id, "assistant", event.text, trace=event.trace

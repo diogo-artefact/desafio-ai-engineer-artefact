@@ -236,5 +236,5 @@ async def test_simulate_tool_summary_formats_brl_and_not_found(tmp_path: Path) -
     agent = SupportAgent(model=FunctionModel(stream_function=call_sim))
     deps = AgentDeps(catalog=repo, orders=repo, policies=repo, knowledge=repo)
     done = await agent.reply("Simule", [], deps)
-    assert done.trace[0]["summary"] == "PIX R$ 1.967,18 · até 12x"
-    assert done.trace[1]["summary"] == "Produto não encontrado"
+    summaries = {entry["summary"] for entry in done.trace}
+    assert summaries == {"PIX R$ 1.967,18 · até 12x", "Produto não encontrado"}

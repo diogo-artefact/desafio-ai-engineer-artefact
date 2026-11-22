@@ -1,5 +1,6 @@
 from emporio.db.repository import SQLiteStoreRepository
 from emporio.db.schema import (
+    AppSettingRow,
     AuditLogRow,
     Base,
     CategoryRow,
@@ -19,6 +20,7 @@ from emporio.db.schema import (
 )
 
 __all__ = [
+    "AppSettingRow",
     "AuditLogRow",
     "Base",
     "CategoryRow",

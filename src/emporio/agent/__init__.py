@@ -1,8 +1,12 @@
 from emporio.agent.events import (
     ALL_TOOL_IDS,
+    ALLOWED_MODEL_IDS,
+    AVAILABLE_MODELS,
+    DEFAULT_MODEL_ID,
     TOOL_META_BY_ID,
     TOOL_REGISTRY,
     AgentEvent,
+    ModelMeta,
     TextDeltaEvent,
     ThinkingDeltaEvent,
     ThinkingEndEvent,
@@ -16,13 +20,17 @@ from emporio.agent.support import SYSTEM_PROMPT, ConversationService, SupportAge
 from emporio.agent.tools import AgentDeps
 
 __all__ = [
+    "ALLOWED_MODEL_IDS",
     "ALL_TOOL_IDS",
+    "AVAILABLE_MODELS",
+    "DEFAULT_MODEL_ID",
     "SYSTEM_PROMPT",
     "TOOL_META_BY_ID",
     "TOOL_REGISTRY",
     "AgentDeps",
     "AgentEvent",
     "ConversationService",
+    "ModelMeta",
     "SupportAgent",
     "TextDeltaEvent",
     "ThinkingDeltaEvent",

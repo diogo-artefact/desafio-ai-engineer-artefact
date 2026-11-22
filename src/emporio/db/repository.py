@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from emporio.auth import AuthenticatedUser, UserRole
 from emporio.db.schema import (
+    AppSettingRow,
     CategoryRow,
     CustomerRow,
     KnowledgeSourceRow,
@@ -620,3 +621,19 @@ class SQLiteStoreRepository:
             result = session.execute(stmt)
             session.commit()
             return bool(result.rowcount)
+
+    def get_setting(self, key: str) -> str | None:
+        with self._session() as session:
+            row = session.get(AppSettingRow, key)
+            return row.value if row is not None else None
+
+    def set_setting(self, key: str, value: str) -> None:
+        now = datetime.now(UTC).isoformat()
+        with self._session() as session:
+            row = session.get(AppSettingRow, key)
+            if row is None:
+                session.add(AppSettingRow(key=key, value=value, updated_at=now))
+            else:
+                row.value = value
+                row.updated_at = now
+            session.commit()

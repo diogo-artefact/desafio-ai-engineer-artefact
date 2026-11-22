@@ -55,6 +55,8 @@ class AppContainer:
             policies=repo,
             knowledge=repo,
             sessions=repo,
+            settings_repo=repo,
+            default_model=resolved_settings.llm_model,
         )
         return cls(
             settings=resolved_settings,

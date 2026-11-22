@@ -179,6 +179,14 @@ class MessageRow(Base):
     created_at: Mapped[str] = mapped_column(String(64), nullable=False)
 
 
+class AppSettingRow(Base):
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
 def create_db_engine(db_path: Path | str) -> Engine:
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
