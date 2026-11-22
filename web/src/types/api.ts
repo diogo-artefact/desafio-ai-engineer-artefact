@@ -121,6 +121,18 @@ export interface ModelsResponse {
   models: ModelInfo[];
 }
 
+export interface UserMemory {
+  fact_key: string;
+  content: string;
+  updated_at: string;
+}
+
+export interface UserPersonalization {
+  custom_instructions: string;
+  updated_at: string | null;
+  memories: UserMemory[];
+}
+
 export interface ChatRequestPayload {
   session_id?: string | null;
   message: string;

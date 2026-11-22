@@ -5,6 +5,7 @@ import { AdminSettingsView } from "./components/AdminSettingsView";
 import { AuthScreen } from "./components/AuthScreen";
 import { ChatView, type ChatTurnError } from "./components/ChatView";
 import { MobileHeader } from "./components/MobileHeader";
+import { PersonalizationView } from "./components/PersonalizationView";
 import { Sidebar, type AppView } from "./components/Sidebar";
 import { StoreInfoModal } from "./components/StoreInfoModal";
 import type { DisplayTraceStep } from "./components/TraceSteps";
@@ -585,6 +586,7 @@ export function App() {
         onNewChat={handleNewChat}
         onSelectSession={handleSelectSession}
         onDeleteSession={handleDeleteSession}
+        onOpenPersonalization={() => setActiveView("personalization")}
         onOpenStoreInfo={() => setStoreModalOpen(true)}
         onOpenSettings={handleOpenSettings}
         onLogout={handleLogout}
@@ -627,7 +629,9 @@ export function App() {
           </div>
         </div>
 
-        {activeView === "settings" && user.role === "admin" ? (
+        {activeView === "personalization" ? (
+          <PersonalizationView token={token} onUnauthorized={handleLogout} />
+        ) : activeView === "settings" && user.role === "admin" ? (
           <AdminSettingsView
             token={token}
             knowledge={knowledge}

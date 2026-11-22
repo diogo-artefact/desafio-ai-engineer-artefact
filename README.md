@@ -36,7 +36,7 @@ npm run dev
 O banco SQLite começa vazio na primeira execução e cria duas contas iniciais configuráveis pelo `.env`.
 
 - Gestor (`admin@admin.com` e senha `admin123`). Acessa o chat de teste e a tela **Ajustes**, onde envia os arquivos da loja, escolhe qual modelo Gemini 4 responde no atendimento e liga ou desliga cada ferramenta do agente.
-- Cliente (`user@user.com` e senha `user123`). Acessa apenas o chat e o modal **Sobre a loja**. Qualquer pessoa pode criar uma conta nova de cliente em **Criar conta**, sem confirmação por e-mail.
+- Cliente (`user@user.com` e senha `user123`). Acessa o chat, a aba **Personalização** (instruções de estilo validadas por guardrail e memórias da conta) e o modal **Sobre a loja**. Qualquer pessoa pode criar uma conta nova de cliente em **Criar conta**, sem confirmação por e-mail.
 
 Antes de subir em produção, altere `SEED_ADMIN_EMAIL`, `SEED_ADMIN_PASSWORD`, `SEED_USER_EMAIL`, `SEED_USER_PASSWORD` e `AUTH_SECRET` no `.env`.
 
@@ -65,6 +65,7 @@ cd web && npm run build
 - **Regras de negócio fora do prompt.** O cálculo de 5% no PIX não cumulativo com promoções, os valores mínimos de parcela em até 12x sem juros, o frete para Campo Grande e outras cidades, a verificação LGPD de pedidos em dois fatores e o prazo legal de 7 dias para devolução rodam em Python determinístico em [`src/emporio/domain/rules.py`](src/emporio/domain/rules.py).
 - **Modelos Gemini 4 e ferramentas controláveis.** O agente usa PydanticAI com streaming de raciocínio e chamadas de ferramenta. Apenas o gestor pode alternar o modelo ativo entre os quatro modelos Gemini 4 (`gemini-4-hydrogen`, `gemini-4-neon`, `gemini-4-carbon` e `gemini-4-argon`) e desativar qualquer uma das cinco ferramentas para testar limites de resposta sem invenção de dados.
 - **Guardrail de entrada System One com Jev.** Inspirado na divisão rápido e devagar documentada em [diogo.sh/system-one](https://diogo.sh/system-one/), [`src/emporio/agent/guardrails.py`](src/emporio/agent/guardrails.py) consulta o Jev (`POST https://api.typesafe.ai/v1/systemone`) antes de chamar o Gemini 4. Com probabilidades calibradas (`noul` para prompt injection com limiar `0.85` e `choice` para intenção com limiar `0.90`), tentativas de injeção, assuntos fora de tema e pedidos exclusivos de acessórios recebem resposta imediata em cerca de 240 a 320 ms sem gastar tokens do modelo principal. Consultas legítimas seguem para o agente com a etapa do guardrail visível apenas para o perfil gestor, e qualquer erro de rede faz fail-open para não interromper o atendimento.
+- **Compactação de conversa, memória e personalização por usuário.** [`src/emporio/agent/memory.py`](src/emporio/agent/memory.py) mantém os últimos turnos intactos e compacta mensagens antigas em `session_summaries` quando a conversa cresce, preservando preferências e restrições sem apagar o histórico completo da interface. Em paralelo após a resposta, extrai apenas preferências duráveis e não sensíveis do usuário em `user_memories`, com filtro determinístico em Python contra PII. Na aba **Personalização**, qualquer usuário autenticado pode revisar ou apagar suas memórias e definir instruções gerais de tom e formato (`GET` e `PUT /api/personalization`), validadas por regras determinísticas e pelo guardrail Jev contra injeção persistida antes de salvar.
 - **Núcleo desacoplado de canal.** O agente depende apenas dos contratos em [`src/emporio/ports.py`](src/emporio/ports.py). A API FastAPI e o frontend React atuam como um adaptador fino de entrada e saída, o que permite adicionar ou remover canais como WhatsApp sem reescrever o núcleo.
 
 ## Evals
@@ -83,7 +84,7 @@ uv run python -m emporio.evals --model google:gemini-4-hydrogen --with-judge
 ## Limitações e próximos passos
 
 - **Escala vetorial.** Guardar embeddings no SQLite funciona bem para poucos documentos e evita subir um serviço adicional. Para grandes volumes de texto, o mesmo contrato de busca migraria para um banco vetorial dedicado.
-- **Expansão dos evals em produção.** A suíte atual cobre 44 testes unitários e de API mais 18 cenários de eval calibrados com 14 rótulos humanos. Em operação real, novos traces rotulados por humanos alimentariam continuamente a taxonomia e comparariam diferentes modelos Gemini 4 em latência e custo.
+- **Expansão dos evals em produção.** A suíte atual cobre 50 testes unitários e de API mais 18 cenários de eval calibrados com 14 rótulos humanos. Em operação real, novos traces rotulados por humanos alimentariam continuamente a taxonomia e comparariam diferentes modelos Gemini 4 em latência e custo.
 - **Autenticação em produção.** O login atual usa hash `scrypt` e token assinado com HMAC para simplificar a execução local. Em ambiente aberto, entrariam verificação de e-mail, revogação de sessão e limite de tentativas.
 - **Novos canais.** A interface web cobre o fluxo completo de cliente e gestor. Integrar WhatsApp ou Telegram exigiria apenas um novo adaptador sobre `ConversationService`.
 

@@ -23,6 +23,7 @@ from emporio.agent import (
     ALLOWED_MODEL_IDS,
     AVAILABLE_MODELS,
     TOOL_REGISTRY,
+    validate_custom_instructions_rules,
 )
 from emporio.api.container import AppContainer
 from emporio.auth import (
@@ -107,6 +108,10 @@ class ChatRequest(BaseModel):
 
 class UpdateModelRequest(BaseModel):
     model_id: str = Field(min_length=1)
+
+
+class UpdatePersonalizationRequest(BaseModel):
+    custom_instructions: str = ""
 
 
 def _sse_line(payload: dict[str, Any]) -> str:
@@ -363,6 +368,68 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
     ) -> Response:
         deps.repo.delete_session(session_id, user_id=user.user_id)
         return Response(status_code=204)
+
+    @api.get("/api/memories")
+    def list_memories(
+        user: Annotated[AuthenticatedUser, Depends(require_user)],
+    ) -> dict[str, Any]:
+        return {
+            "memories": [
+                item.model_dump() for item in deps.repo.list_user_memories(user.user_id)
+            ]
+        }
+
+    @api.delete("/api/memories/{fact_key}", status_code=204)
+    def delete_memory(
+        fact_key: str,
+        user: Annotated[AuthenticatedUser, Depends(require_user)],
+    ) -> Response:
+        deps.repo.delete_user_memory(user.user_id, fact_key)
+        return Response(status_code=204)
+
+    @api.delete("/api/memories", status_code=204)
+    def clear_memories(
+        user: Annotated[AuthenticatedUser, Depends(require_user)],
+    ) -> Response:
+        deps.repo.clear_user_memories(user.user_id)
+        return Response(status_code=204)
+
+    @api.get("/api/personalization")
+    def get_personalization(
+        user: Annotated[AuthenticatedUser, Depends(require_user)],
+    ) -> dict[str, Any]:
+        pref = deps.repo.get_custom_instructions(user.user_id)
+        return {
+            **pref.model_dump(),
+            "memories": [
+                item.model_dump() for item in deps.repo.list_user_memories(user.user_id)
+            ],
+        }
+
+    @api.put("/api/personalization")
+    async def update_personalization(
+        body: UpdatePersonalizationRequest,
+        user: Annotated[AuthenticatedUser, Depends(require_user)],
+    ) -> dict[str, Any]:
+        clean = body.custom_instructions.strip()
+        if clean:
+            rule_error = validate_custom_instructions_rules(clean)
+            if rule_error is not None:
+                raise HTTPException(status_code=400, detail=rule_error)
+            if deps.guardrail is not None:
+                validation = await deps.guardrail.validate_instructions(clean)
+                if not validation.allowed:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=validation.reason or "Instruções recusadas pelo guardrail.",
+                    )
+        saved = deps.repo.save_custom_instructions(user.user_id, clean)
+        return {
+            **saved.model_dump(),
+            "memories": [
+                item.model_dump() for item in deps.repo.list_user_memories(user.user_id)
+            ],
+        }
 
     @api.get("/api/tools")
     def list_tools(

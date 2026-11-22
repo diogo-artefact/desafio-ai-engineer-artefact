@@ -142,7 +142,7 @@ export function ChatView({
         <div className="flex w-full max-w-[var(--container-chat)] flex-col gap-6">
           <div className="flex flex-col gap-2">
             <h1 className="m-0 text-[24px] font-medium leading-[110%] text-[var(--color-ink-primary)]">
-              Em que instrumento posso ajudar?
+              Em que posso ajudar?
             </h1>
             <p className="m-0 text-[16px] font-normal leading-[130%] text-[var(--color-ink-secondary)]">
               Consulte estoque real, condições de PIX e parcelamento, políticas da loja ou seu

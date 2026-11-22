@@ -162,3 +162,37 @@ class GuardrailDecision(BaseModel):
     reply: str | None = None
     model: str = ""
     summary: str = ""
+
+
+class SessionCompaction(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    session_id: str
+    summary: str
+    compacted_up_to_message_id: int
+    updated_at: str
+
+
+class UserMemory(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    fact_key: str
+    content: str
+    updated_at: str
+
+
+class UserPersonalization(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    custom_instructions: str
+    updated_at: str | None = None
+
+
+class InstructionValidationResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    allowed: bool
+    reason: str | None = None
+    override_probability: float = 0.0
+    model: str = ""
+    latency_ms: int = 0

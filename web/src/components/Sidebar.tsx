@@ -1,9 +1,18 @@
-import { Info, LogOut, PanelLeft, Plus, SlidersHorizontal, Trash2, X } from "lucide-react";
+import {
+  Info,
+  LogOut,
+  PanelLeft,
+  Plus,
+  SlidersHorizontal,
+  Trash2,
+  UserRound,
+  X,
+} from "lucide-react";
 
 import { groupSessionsByRecency } from "../lib/dates";
 import type { AuthUser, SessionSummary } from "../types/api";
 
-export type AppView = "chat" | "settings";
+export type AppView = "chat" | "personalization" | "settings";
 
 interface SidebarProps {
   user: AuthUser;
@@ -18,6 +27,7 @@ interface SidebarProps {
   onNewChat: () => void;
   onSelectSession: (sessionId: string) => void;
   onDeleteSession: (sessionId: string) => void;
+  onOpenPersonalization: () => void;
   onOpenStoreInfo: () => void;
   onOpenSettings: () => void;
   onLogout: () => void;
@@ -93,6 +103,7 @@ function SidebarContent({
   onNewChat,
   onSelectSession,
   onDeleteSession,
+  onOpenPersonalization,
   onOpenStoreInfo,
   onOpenSettings,
   onLogout,
@@ -189,6 +200,27 @@ function SidebarContent({
       </div>
 
       <div className="flex shrink-0 flex-col gap-1 border-t border-[var(--color-border-default)] pt-4">
+        <button
+          type="button"
+          onClick={wrapMobileClose(onOpenPersonalization)}
+          className={`flex h-8 w-full items-center gap-2 rounded-[8px] border-0 px-2 text-left text-[14px] leading-[140%] transition-colors ${
+            activeView === "personalization"
+              ? "bg-[var(--color-bg-hover)] font-medium text-[var(--color-ink-primary)]"
+              : "bg-transparent font-normal text-[var(--color-ink-secondary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-ink-primary)]"
+          }`}
+        >
+          <UserRound
+            size={16}
+            strokeWidth={1.5}
+            className={`shrink-0 ${
+              activeView === "personalization"
+                ? "text-[var(--color-ink-primary)]"
+                : "text-[var(--color-ink-muted)]"
+            }`}
+          />
+          <span>Personalização</span>
+        </button>
+
         <button
           type="button"
           onClick={wrapMobileClose(onOpenStoreInfo)}

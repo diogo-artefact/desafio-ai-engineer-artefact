@@ -26,6 +26,9 @@ from emporio.db.schema import (
     ProductRow,
     PromotionRow,
     SessionRow,
+    SessionSummaryRow,
+    UserMemoryRow,
+    UserPreferenceRow,
     UserRow,
     create_db_engine,
     init_schema,
@@ -39,6 +42,9 @@ from emporio.domain.models import (
     ProductDetail,
     ProductSummary,
     PromotionInfo,
+    SessionCompaction,
+    UserMemory,
+    UserPersonalization,
 )
 from emporio.domain.text import normalize_phone_digits, normalize_text
 from emporio.etl.embeddings import Embedder, cosine_similarity
@@ -637,3 +643,136 @@ class SQLiteStoreRepository:
                 row.value = value
                 row.updated_at = now
             session.commit()
+
+    def get_session_compaction(self, session_id: str) -> SessionCompaction | None:
+        with self._session() as session:
+            row = session.get(SessionSummaryRow, session_id)
+            if row is None:
+                return None
+            return SessionCompaction(
+                session_id=row.session_id,
+                summary=row.summary,
+                compacted_up_to_message_id=row.compacted_up_to_message_id,
+                updated_at=row.updated_at,
+            )
+
+    def save_session_compaction(
+        self,
+        session_id: str,
+        summary: str,
+        compacted_up_to_message_id: int,
+    ) -> None:
+        now = datetime.now(UTC).isoformat()
+        with self._session() as session:
+            row = session.get(SessionSummaryRow, session_id)
+            if row is None:
+                session.add(
+                    SessionSummaryRow(
+                        session_id=session_id,
+                        summary=summary,
+                        compacted_up_to_message_id=compacted_up_to_message_id,
+                        updated_at=now,
+                    )
+                )
+            else:
+                row.summary = summary
+                row.compacted_up_to_message_id = compacted_up_to_message_id
+                row.updated_at = now
+            session.commit()
+
+    def list_user_memories(self, user_id: str, limit: int = 12) -> list[UserMemory]:
+        with self._session() as session:
+            stmt = (
+                select(UserMemoryRow)
+                .where(UserMemoryRow.user_id == user_id)
+                .order_by(UserMemoryRow.updated_at.desc(), UserMemoryRow.id.desc())
+                .limit(limit)
+            )
+            return [
+                UserMemory(
+                    fact_key=r.fact_key,
+                    content=r.content,
+                    updated_at=r.updated_at,
+                )
+                for r in session.scalars(stmt)
+            ]
+
+    def upsert_user_memories(
+        self,
+        user_id: str,
+        memories: list[tuple[str, str]],
+    ) -> None:
+        if not memories:
+            return
+        now = datetime.now(UTC).isoformat()
+        with self._session() as session:
+            for fact_key, content in memories:
+                existing = session.scalar(
+                    select(UserMemoryRow).where(
+                        UserMemoryRow.user_id == user_id,
+                        UserMemoryRow.fact_key == fact_key,
+                    )
+                )
+                if existing is None:
+                    session.add(
+                        UserMemoryRow(
+                            user_id=user_id,
+                            fact_key=fact_key,
+                            content=content,
+                            updated_at=now,
+                        )
+                    )
+                else:
+                    existing.content = content
+                    existing.updated_at = now
+            session.commit()
+
+    def delete_user_memory(self, user_id: str, fact_key: str) -> bool:
+        with self._session() as session:
+            stmt = delete(UserMemoryRow).where(
+                UserMemoryRow.user_id == user_id,
+                UserMemoryRow.fact_key == fact_key,
+            )
+            result = session.execute(stmt)
+            session.commit()
+            return bool(result.rowcount)
+
+    def clear_user_memories(self, user_id: str) -> int:
+        with self._session() as session:
+            stmt = delete(UserMemoryRow).where(UserMemoryRow.user_id == user_id)
+            result = session.execute(stmt)
+            session.commit()
+            return int(result.rowcount or 0)
+
+    def get_custom_instructions(self, user_id: str) -> UserPersonalization:
+        with self._session() as session:
+            row = session.get(UserPreferenceRow, user_id)
+            if row is None:
+                return UserPersonalization(custom_instructions="", updated_at=None)
+            return UserPersonalization(
+                custom_instructions=row.custom_instructions,
+                updated_at=row.updated_at,
+            )
+
+    def save_custom_instructions(
+        self,
+        user_id: str,
+        instructions: str,
+    ) -> UserPersonalization:
+        now = datetime.now(UTC).isoformat()
+        clean = instructions.strip()
+        with self._session() as session:
+            row = session.get(UserPreferenceRow, user_id)
+            if row is None:
+                session.add(
+                    UserPreferenceRow(
+                        user_id=user_id,
+                        custom_instructions=clean,
+                        updated_at=now,
+                    )
+                )
+            else:
+                row.custom_instructions = clean
+                row.updated_at = now
+            session.commit()
+        return UserPersonalization(custom_instructions=clean, updated_at=now)

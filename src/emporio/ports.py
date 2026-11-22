@@ -5,11 +5,15 @@ from typing import Any, Protocol
 from emporio.auth import AuthenticatedUser, UserRole
 from emporio.domain.models import (
     GuardrailDecision,
+    InstructionValidationResult,
     KnowledgeStatus,
     OrderInfo,
     PolicyChunkHit,
     ProductDetail,
     ProductSummary,
+    SessionCompaction,
+    UserMemory,
+    UserPersonalization,
 )
 
 
@@ -59,9 +63,62 @@ class InputGuardrail(Protocol):
         history: list[dict[str, Any]],
     ) -> GuardrailDecision: ...
 
+    async def validate_instructions(
+        self,
+        instructions: str,
+    ) -> InstructionValidationResult: ...
+
 
 class TitleGenerator(Protocol):
     async def generate(self, message: str) -> str | None: ...
+
+
+class CompactionRepository(Protocol):
+    def get_session_compaction(self, session_id: str) -> SessionCompaction | None: ...
+
+    def save_session_compaction(
+        self,
+        session_id: str,
+        summary: str,
+        compacted_up_to_message_id: int,
+    ) -> None: ...
+
+
+class MemoryRepository(Protocol):
+    def list_user_memories(self, user_id: str, limit: int = 12) -> list[UserMemory]: ...
+
+    def upsert_user_memories(
+        self, user_id: str, memories: list[tuple[str, str]]
+    ) -> None: ...
+
+    def delete_user_memory(self, user_id: str, fact_key: str) -> bool: ...
+
+    def clear_user_memories(self, user_id: str) -> int: ...
+
+
+class PersonalizationRepository(Protocol):
+    def get_custom_instructions(self, user_id: str) -> UserPersonalization: ...
+
+    def save_custom_instructions(
+        self, user_id: str, instructions: str
+    ) -> UserPersonalization: ...
+
+
+class ConversationCompactor(Protocol):
+    async def compact(
+        self,
+        previous_summary: str | None,
+        messages: list[dict[str, Any]],
+    ) -> str | None: ...
+
+
+class UserMemoryExtractor(Protocol):
+    async def extract(
+        self,
+        user_message: str,
+        assistant_response: str,
+        existing: list[UserMemory],
+    ) -> list[tuple[str, str]]: ...
 
 
 class UserRepository(Protocol):

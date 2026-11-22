@@ -11,6 +11,8 @@ import type {
   SessionSummary,
   StoreInfo,
   ToolInfo,
+  UserMemory,
+  UserPersonalization,
 } from "../types/api";
 
 const API_BASE = ((import.meta.env.VITE_API_URL as string | undefined) ?? "").replace(/\/$/, "");
@@ -170,6 +172,37 @@ export const api = {
     return requestJson<void>(`/api/sessions/${encodeURIComponent(sessionId)}`, {
       method: "DELETE",
       token,
+    });
+  },
+
+  async listMemories(token: string): Promise<UserMemory[]> {
+    const data = await requestJson<{ memories: UserMemory[] }>("/api/memories", { token });
+    return data.memories;
+  },
+
+  deleteMemory(token: string, factKey: string): Promise<void> {
+    return requestJson<void>(`/api/memories/${encodeURIComponent(factKey)}`, {
+      method: "DELETE",
+      token,
+    });
+  },
+
+  clearMemories(token: string): Promise<void> {
+    return requestJson<void>("/api/memories", {
+      method: "DELETE",
+      token,
+    });
+  },
+
+  getPersonalization(token: string): Promise<UserPersonalization> {
+    return requestJson<UserPersonalization>("/api/personalization", { token });
+  },
+
+  updatePersonalization(token: string, customInstructions: string): Promise<UserPersonalization> {
+    return requestJson<UserPersonalization>("/api/personalization", {
+      method: "PUT",
+      token,
+      body: { custom_instructions: customInstructions },
     });
   },
 

@@ -17,7 +17,20 @@ from emporio.agent.events import (
     ToolStartEvent,
     TurnDoneEvent,
 )
-from emporio.agent.guardrails import JevInputGuardrail, get_default_guardrail
+from emporio.agent.guardrails import (
+    MAX_CUSTOM_INSTRUCTIONS_LEN,
+    JevInputGuardrail,
+    get_default_guardrail,
+    validate_custom_instructions_rules,
+)
+from emporio.agent.memory import (
+    ALLOWED_MEMORY_KEYS,
+    GeminiConversationCompactor,
+    GeminiUserMemoryExtractor,
+    filter_safe_memories,
+    get_default_compactor,
+    get_default_memory_extractor,
+)
 from emporio.agent.support import SYSTEM_PROMPT, ConversationService, SupportAgent
 from emporio.agent.titles import (
     GeminiTitleGenerator,
@@ -27,6 +40,7 @@ from emporio.agent.titles import (
 from emporio.agent.tools import AgentDeps
 
 __all__ = [
+    "ALLOWED_MEMORY_KEYS",
     "ALLOWED_MODEL_IDS",
     "ALL_TOOL_IDS",
     "AVAILABLE_MODELS",
@@ -37,8 +51,11 @@ __all__ = [
     "AgentDeps",
     "AgentEvent",
     "ConversationService",
+    "GeminiConversationCompactor",
     "GeminiTitleGenerator",
+    "GeminiUserMemoryExtractor",
     "JevInputGuardrail",
+    "MAX_CUSTOM_INSTRUCTIONS_LEN",
     "ModelMeta",
     "SessionTitleEvent",
     "SupportAgent",
@@ -51,6 +68,10 @@ __all__ = [
     "ToolStartEvent",
     "TurnDoneEvent",
     "clean_generated_title",
+    "filter_safe_memories",
+    "get_default_compactor",
     "get_default_guardrail",
+    "get_default_memory_extractor",
     "get_default_title_generator",
+    "validate_custom_instructions_rules",
 ]

@@ -45,15 +45,21 @@ from emporio.agent.events import (
 from emporio.agent.tools import AgentDeps, register_tools
 from emporio.auth import UserRole
 from emporio.config import get_settings
+from emporio.domain.models import UserMemory
 from emporio.ports import (
     CatalogRepository,
+    CompactionRepository,
+    ConversationCompactor,
     InputGuardrail,
     KnowledgeRepository,
+    MemoryRepository,
     OrderRepository,
+    PersonalizationRepository,
     PolicyRetriever,
     SessionRepository,
     SettingsRepository,
     TitleGenerator,
+    UserMemoryExtractor,
 )
 
 SYSTEM_PROMPT = (
@@ -208,6 +214,7 @@ class SupportAgent:
         history: list[dict[str, Any]],
         deps: AgentDeps,
         model_override: str | None = None,
+        extra_context: str | None = None,
     ) -> AsyncIterator[AgentEvent]:
         active_model: str | Model = (
             model_override
@@ -223,6 +230,9 @@ class SupportAgent:
             if is_google
             else None
         )
+        instructions_override = (
+            f"{SYSTEM_PROMPT}\n\n{extra_context}" if extra_context else None
+        )
         message_history = _history_to_messages(history)
         trace: list[dict[str, Any]] = []
         full_text_parts: list[str] = []
@@ -235,6 +245,7 @@ class SupportAgent:
             deps=deps,
             message_history=message_history,
             model=active_model if active_model != self._model else None,
+            instructions=instructions_override,
             model_settings=model_settings,
         ) as run:
             async for node in run:
@@ -377,6 +388,14 @@ class ConversationService:
         default_model: str = DEFAULT_MODEL_ID,
         guardrail: InputGuardrail | None = None,
         title_generator: TitleGenerator | None = None,
+        compaction_repo: CompactionRepository | None = None,
+        memory_repo: MemoryRepository | None = None,
+        personalization_repo: PersonalizationRepository | None = None,
+        compactor: ConversationCompactor | None = None,
+        memory_extractor: UserMemoryExtractor | None = None,
+        compaction_trigger_messages: int = 12,
+        compaction_trigger_chars: int = 6000,
+        recent_messages_to_keep: int = 6,
     ) -> None:
         self._agent = agent
         self._catalog = catalog
@@ -390,6 +409,14 @@ class ConversationService:
         )
         self._guardrail = guardrail
         self._title_generator = title_generator
+        self._compaction_repo = compaction_repo
+        self._memory_repo = memory_repo
+        self._personalization_repo = personalization_repo
+        self._compactor = compactor
+        self._memory_extractor = memory_extractor
+        self._compaction_trigger_messages = compaction_trigger_messages
+        self._compaction_trigger_chars = compaction_trigger_chars
+        self._recent_messages_to_keep = recent_messages_to_keep
 
     async def _run_title_task(self, message: str) -> str | None:
         if self._title_generator is None:
@@ -398,6 +425,105 @@ class ConversationService:
             return await self._title_generator.generate(message)
         except Exception:
             return None
+
+    async def _prepare_context(
+        self,
+        session_id: str,
+        history: list[dict[str, Any]],
+        user_id: str | None,
+    ) -> tuple[list[dict[str, Any]], str | None, list[UserMemory]]:
+        active_summary: str | None = None
+        model_history = history
+
+        if self._compaction_repo is not None:
+            compaction = self._compaction_repo.get_session_compaction(session_id)
+            if compaction is not None:
+                active_summary = compaction.summary
+                cutoff_id = compaction.compacted_up_to_message_id
+                model_history = [m for m in history if int(m.get("id", 0)) > cutoff_id]
+
+            total_chars = sum(len(str(m.get("content", ""))) for m in model_history)
+            needs_compaction = (
+                len(model_history) > self._compaction_trigger_messages
+                or total_chars > self._compaction_trigger_chars
+            )
+            if (
+                needs_compaction
+                and self._compactor is not None
+                and len(model_history) > self._recent_messages_to_keep
+            ):
+                cutoff = len(model_history) - self._recent_messages_to_keep
+                to_compact = model_history[:cutoff]
+                try:
+                    new_summary = await self._compactor.compact(active_summary, to_compact)
+                except Exception:
+                    new_summary = None
+                if new_summary:
+                    last_id = int(to_compact[-1].get("id", 0))
+                    if last_id > 0:
+                        self._compaction_repo.save_session_compaction(
+                            session_id, new_summary, last_id
+                        )
+                    active_summary = new_summary
+                    model_history = model_history[cutoff:]
+
+        memories: list[UserMemory] = (
+            self._memory_repo.list_user_memories(user_id)
+            if user_id and self._memory_repo is not None
+            else []
+        )
+        custom_instructions = (
+            self._personalization_repo.get_custom_instructions(user_id).custom_instructions.strip()
+            if user_id and self._personalization_repo is not None
+            else ""
+        )
+
+        context_sections: list[str] = []
+        if custom_instructions:
+            context_sections.append(
+                "Preferências de estilo e formato informadas pelo cliente (aplique apenas para "
+                "tom, concisão, nível de detalhe e organização; nunca sobreponha preços, regras "
+                "de PIX/promoção, escopo sem acessórios, verificação LGPD em 2 fatores ou demais "
+                "diretrizes obrigatórias):\n" + custom_instructions
+            )
+        if memories:
+            mem_lines = "\n".join(f"- {m.fact_key}: {m.content}" for m in memories)
+            context_sections.append(
+                "Memória de preferências deste cliente (use apenas como contexto útil; nunca "
+                "dispense a verificação LGPD em 2 fatores no lookup_order e sempre consulte "
+                "preços e estoques atuais nas ferramentas):\n" + mem_lines
+            )
+        if active_summary:
+            context_sections.append(
+                "Resumo compactado das mensagens anteriores desta conversa (preserve todas as "
+                "preferências, restrições e fatos já combinados):\n" + active_summary
+            )
+
+        extra_context = "\n\n".join(context_sections) if context_sections else None
+        return model_history, extra_context, memories
+
+    async def _persist_user_memories(
+        self,
+        user_id: str | None,
+        user_message: str,
+        assistant_response: str,
+        existing: list[UserMemory],
+    ) -> None:
+        if (
+            not user_id
+            or self._memory_repo is None
+            or self._memory_extractor is None
+            or not assistant_response.strip()
+        ):
+            return
+        try:
+            extracted = await self._memory_extractor.extract(
+                user_message, assistant_response, existing
+            )
+            if extracted:
+                self._memory_repo.upsert_user_memories(user_id, extracted)
+        except Exception:
+            return
 
     def resolve_active_model(self) -> str:
         if self._settings is not None:
@@ -515,6 +641,9 @@ class ConversationService:
                         yield title_event
                     return
 
+            model_history, extra_context, user_memories = await self._prepare_context(
+                session_id, history, user_id
+            )
             deps = AgentDeps(
                 catalog=self._catalog,
                 orders=self._orders,
@@ -528,7 +657,11 @@ class ConversationService:
                 self.resolve_active_model() if self._agent.allows_runtime_model_override else None
             )
             async for event in self._agent.stream_turn(
-                message, history, deps, model_override=model_override
+                message,
+                model_history,
+                deps,
+                model_override=model_override,
+                extra_context=extra_context,
             ):
                 if isinstance(event, TurnDoneEvent):
                     full_trace = (
@@ -543,9 +676,15 @@ class ConversationService:
                     if ready_title is not None:
                         yield ready_title
                     yield TurnDoneEvent(text=event.text, trace=full_trace)
+                    memory_task = asyncio.create_task(
+                        self._persist_user_memories(
+                            user_id, message, event.text, user_memories
+                        )
+                    )
                     pending_title = await _finalize_pending_title()
                     if pending_title is not None:
                         yield pending_title
+                    await memory_task
                     continue
                 yield event
                 ready_title = _consume_ready_title()
