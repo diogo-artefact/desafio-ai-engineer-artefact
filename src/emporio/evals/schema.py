@@ -15,6 +15,7 @@ FailureCategory = Literal[
     "policy_grounding",
     "tool_failure_honesty",
     "role_isolation",
+    "guardrail_safety",
 ]
 
 BinaryVerdict = Literal["PASS", "FAIL"]

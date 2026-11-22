@@ -45,6 +45,7 @@ from emporio.auth import UserRole
 from emporio.config import get_settings
 from emporio.ports import (
     CatalogRepository,
+    InputGuardrail,
     KnowledgeRepository,
     OrderRepository,
     PolicyRetriever,
@@ -371,6 +372,7 @@ class ConversationService:
         sessions: SessionRepository,
         settings_repo: SettingsRepository | None = None,
         default_model: str = DEFAULT_MODEL_ID,
+        guardrail: InputGuardrail | None = None,
     ) -> None:
         self._agent = agent
         self._catalog = catalog
@@ -382,6 +384,7 @@ class ConversationService:
         self._default_model = (
             default_model if default_model in ALLOWED_MODEL_IDS else DEFAULT_MODEL_ID
         )
+        self._guardrail = guardrail
 
     def resolve_active_model(self) -> str:
         if self._settings is not None:
@@ -419,6 +422,47 @@ class ConversationService:
         history = self._ensure_session(session_id, message, user_id=user_id)
         self._sessions.append_message(session_id, "user", message)
 
+        guardrail_trace: dict[str, Any] | None = None
+        if self._guardrail is not None:
+            call_id = "guardrail-jev"
+            yield ToolStartEvent(
+                tool_call_id=call_id,
+                tool_name="jev_guardrail",
+                label="Verificando guardrail (Jev)",
+                args={},
+            )
+            decision = await self._guardrail.check(message, history)
+            guardrail_args: dict[str, Any] = {
+                "intent": decision.intent,
+                "probability": decision.intent_probability,
+                "prompt_injection": decision.prompt_injection_probability,
+            }
+            guardrail_trace = {
+                "type": "tool",
+                "tool_name": "jev_guardrail",
+                "label": "Verificou guardrail (Jev)",
+                "summary": decision.summary,
+                "args": guardrail_args,
+                "duration_ms": decision.latency_ms,
+            }
+            yield ToolEndEvent(
+                tool_call_id=call_id,
+                tool_name="jev_guardrail",
+                label="Verificou guardrail (Jev)",
+                summary=decision.summary,
+                duration_ms=decision.latency_ms,
+            )
+            if decision.action != "allow" and decision.reply:
+                yield TextDeltaEvent(delta=decision.reply)
+                self._sessions.append_message(
+                    session_id,
+                    "assistant",
+                    decision.reply,
+                    trace=[guardrail_trace],
+                )
+                yield TurnDoneEvent(text=decision.reply, trace=[guardrail_trace])
+                return
+
         deps = AgentDeps(
             catalog=self._catalog,
             orders=self._orders,
@@ -435,9 +479,14 @@ class ConversationService:
             message, history, deps, model_override=model_override
         ):
             if isinstance(event, TurnDoneEvent):
-                self._sessions.append_message(
-                    session_id, "assistant", event.text, trace=event.trace
+                full_trace = (
+                    [guardrail_trace, *event.trace] if guardrail_trace is not None else event.trace
                 )
+                self._sessions.append_message(
+                    session_id, "assistant", event.text, trace=full_trace
+                )
+                yield TurnDoneEvent(text=event.text, trace=full_trace)
+                continue
             yield event
 
     async def send_message(

@@ -4,6 +4,7 @@ from typing import Any, Protocol
 
 from emporio.auth import AuthenticatedUser, UserRole
 from emporio.domain.models import (
+    GuardrailDecision,
     KnowledgeStatus,
     OrderInfo,
     PolicyChunkHit,
@@ -49,6 +50,14 @@ class SettingsRepository(Protocol):
     def get_setting(self, key: str) -> str | None: ...
 
     def set_setting(self, key: str, value: str) -> None: ...
+
+
+class InputGuardrail(Protocol):
+    async def check(
+        self,
+        message: str,
+        history: list[dict[str, Any]],
+    ) -> GuardrailDecision: ...
 
 
 class UserRepository(Protocol):

@@ -113,6 +113,28 @@ def _sse_line(payload: dict[str, Any]) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
+ADMIN_ONLY_TRACE_TOOLS: frozenset[str] = frozenset({"jev_guardrail"})
+
+
+def _filter_trace_for_role(trace: list[dict[str, Any]], role: str) -> list[dict[str, Any]]:
+    if role == "admin":
+        return trace
+    return [step for step in trace if step.get("tool_name") not in ADMIN_ONLY_TRACE_TOOLS]
+
+
+def _filter_event_for_role(payload: dict[str, Any], role: str) -> dict[str, Any] | None:
+    if role == "admin":
+        return payload
+    if (
+        payload.get("type") in ("tool_start", "tool_end")
+        and payload.get("tool_name") in ADMIN_ONLY_TRACE_TOOLS
+    ):
+        return None
+    if payload.get("type") == "done" and isinstance(payload.get("trace"), list):
+        return {**payload, "trace": _filter_trace_for_role(payload["trace"], role)}
+    return payload
+
+
 def _error_event_from(exc: Exception) -> dict[str, Any]:
     status_code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
     if isinstance(status_code, int) and status_code == 429:
@@ -325,9 +347,13 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
         match = deps.repo.get_session(session_id, user_id=user.user_id)
         if match is None:
             raise HTTPException(status_code=404, detail="Conversa não encontrada.")
+        messages = [
+            {**msg, "trace": _filter_trace_for_role(msg.get("trace", []), user.role)}
+            for msg in deps.repo.get_messages(session_id)
+        ]
         return {
             "session": match,
-            "messages": deps.repo.get_messages(session_id),
+            "messages": messages,
         }
 
     @api.delete("/api/sessions/{session_id}", status_code=204)
@@ -436,7 +462,9 @@ def create_app(container: AppContainer | None = None) -> FastAPI:
                     user_id=user.user_id,
                     user_role=user.role,
                 ):
-                    yield _sse_line(event.model_dump())
+                    filtered = _filter_event_for_role(event.model_dump(), user.role)
+                    if filtered is not None:
+                        yield _sse_line(filtered)
             except (
                 ModelHTTPError,
                 ModelAPIError,

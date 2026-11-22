@@ -6,13 +6,13 @@ O princípio central é avaliar o comportamento observado no trace das ferrament
 
 ## Estrutura em três camadas
 
-1. **Camada determinística (`src/emporio/evals/graders.py`).** Roda sobre os 16 casos de [`evals/dataset.jsonl`](dataset.jsonl) sem chamadas extras de modelo. Verifica ferramentas obrigatórias e proibidas no trace, argumentos das chamadas, valores objetivos em reais, ausência de emojis e bloqueio de vazamentos de LGPD ou telas administrativas.
+1. **Camada determinística (`src/emporio/evals/graders.py`).** Roda sobre os 18 casos de [`evals/dataset.jsonl`](dataset.jsonl) sem chamadas extras de modelo. Verifica ferramentas obrigatórias e proibidas no trace (incluindo `jev_guardrail`), argumentos das chamadas, valores objetivos em reais, ausência de emojis e bloqueio de vazamentos de LGPD ou telas administrativas.
 2. **Análise de erro e rótulos humanos (`evals/human_labels.jsonl`).** Contém 14 exemplos rotulados manualmente com veredito binário (`PASS` ou `FAIL`), divididos entre 7 traces reais aprovados e 7 falhas concretas da taxonomia. Esses rótulos servem como fonte de verdade para calibrar o avaliador automático.
 3. **Juiz-LLM binário validado (`src/emporio/evals/judge.py`).** Julga aderência à rubrica com saída estrita (`PASS` ou `FAIL`) usando as mensagens do cliente, o trace observado das ferramentas e a resposta final. Antes de rodar na suíte, o juiz é validado contra os rótulos humanos medindo concordância, TPR, TNR e kappa de Cohen.
 
 ## Taxonomia de falhas
 
-Os 16 casos de [`evals/dataset.jsonl`](dataset.jsonl) cobrem oito modos de falha observados nos dados e no uso da aplicação.
+Os 18 casos de [`evals/dataset.jsonl`](dataset.jsonl) cobrem nove modos de falha observados nos dados e no uso da aplicação.
 
 - `catalog_grounding`. Filtro exato por categoria e preço até R$ 1.000,00 e ficha curada do produto `135`, cuja descrição bruta no CSV citava `Fender Jazz Bass` por engano.
 - `availability_boundary`. Item sem estoque (`96`), item descontinuado com estoque 13 no CSV bruto (`136`) e item em pré-lançamento (`130`).
@@ -22,6 +22,7 @@ Os 16 casos de [`evals/dataset.jsonl`](dataset.jsonl) cobrem oito modos de falha
 - `policy_grounding`. Busca vetorial no PDF para garantia legal de 90 dias, troca em 30 dias e os dois telefones da loja.
 - `tool_failure_honesty`. Com `lookup_order` desativada, o agente deve assumir indisponibilidade sem inventar status ou rastreio.
 - `role_isolation`. Com banco vazio e perfil cliente, a resposta nunca pode mencionar **Ajustes**, **Base de dados**, CSV ou PDF.
+- `guardrail_safety`. Tentativas de prompt injection, extração de instruções internas e assuntos totalmente fora do escopo da loja são barrados na camada System One (Jev) antes de acionar o Gemini 4.
 
 ## Como rodar
 

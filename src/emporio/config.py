@@ -12,7 +12,10 @@ class Settings(BaseSettings):
     )
 
     gemini_api_key: str = ""
+    typesafe_api_key: str = ""
     llm_model: str = "google:gemini-4-hydrogen"
+    jev_model: str = "jev-latest"
+    jev_api_url: str = "https://api.typesafe.ai/v1/systemone"
     embedding_model: str = "gemini-embedding-001"
     embedding_dimensions: int = 768
     raw_data_dir: Path = Path("data/raw")

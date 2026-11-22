@@ -12,7 +12,7 @@ from typing import Any
 
 from pydantic_ai.models import Model
 
-from emporio.agent import ALLOWED_MODEL_IDS, DEFAULT_MODEL_ID
+from emporio.agent import ALLOWED_MODEL_IDS, DEFAULT_MODEL_ID, get_default_guardrail
 from emporio.api import AppContainer
 from emporio.etl.embeddings import Embedder, get_default_embedder
 from emporio.etl.loader import ingest_policy_pdf, ingest_store_csvs
@@ -26,6 +26,7 @@ from emporio.evals.schema import (
     JudgeVerdict,
     TurnRecord,
 )
+from emporio.ports import InputGuardrail
 
 DEFAULT_DATASET_PATH = Path("evals/dataset.jsonl")
 DEFAULT_LABELS_PATH = Path("evals/human_labels.jsonl")
@@ -149,9 +150,16 @@ async def run_suite(
     embedder: Embedder | None = None,
     with_judge: bool = False,
     judge_model: str | Model | None = None,
+    use_guardrail: bool = True,
+    guardrail: InputGuardrail | None = None,
 ) -> list[CaseRunResult]:
     model_name = model if isinstance(model, str) else type(model).__name__
     resolved_embedder = embedder if embedder is not None else get_default_embedder()
+    resolved_guardrail = (
+        guardrail
+        if guardrail is not None
+        else (get_default_guardrail() if use_guardrail else None)
+    )
     raw_csvs, raw_pdf = _read_raw_dir(raw_dir)
     judge = BinaryTraceJudge(model=judge_model or model) if with_judge else None
 
@@ -171,6 +179,7 @@ async def run_suite(
             db_path=full_db,
             embedder=resolved_embedder,
             model=model,
+            guardrail=resolved_guardrail,
         )
 
         for case in cases:
@@ -190,6 +199,7 @@ async def run_suite(
                     db_path=case_db,
                     embedder=resolved_embedder,
                     model=model,
+                    guardrail=resolved_guardrail,
                 )
 
             case_result = await run_case(
@@ -309,6 +319,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--judge-model", type=str, default=None)
     parser.add_argument("--case", type=str, default=None)
     parser.add_argument("--with-judge", action="store_true")
+    parser.add_argument("--no-guardrail", action="store_true")
     parser.add_argument("--validate-judge", action="store_true")
     parser.add_argument("--output", type=Path, default=None)
     return parser
@@ -341,6 +352,7 @@ def main() -> None:
             model=args.model,
             with_judge=args.with_judge,
             judge_model=args.judge_model,
+            use_guardrail=not args.no_guardrail,
         )
     )
     _print_suite_report(results)

@@ -15,7 +15,7 @@ uv sync
 cp .env.example .env
 ```
 
-2. Preencha `GEMINI_API_KEY` no arquivo `.env` e inicie a API em FastAPI.
+2. Preencha `GEMINI_API_KEY` no arquivo `.env` (e opcionalmente `TYPESAFE_API_KEY` para ativar o guardrail de entrada com Jev) e inicie a API em FastAPI.
 
 ```bash
 uv run uvicorn emporio.api:create_app --factory --host 127.0.0.1 --port 8000
@@ -64,13 +64,14 @@ cd web && npm run build
 - **ORM no catálogo e busca vetorial no manual.** Preço, estoque e pedidos saem de consultas tipadas no SQLAlchemy sobre SQLite. O manual em PDF é dividido em 26 trechos por seção e subseção, recebe embeddings `gemini-embedding-001` na ingestão e usa similaridade de cosseno na busca, com fallback por palavras em Python se a API falhar.
 - **Regras de negócio fora do prompt.** O cálculo de 5% no PIX não cumulativo com promoções, os valores mínimos de parcela em até 12x sem juros, o frete para Campo Grande e outras cidades, a verificação LGPD de pedidos em dois fatores e o prazo legal de 7 dias para devolução rodam em Python determinístico em [`src/emporio/domain/rules.py`](src/emporio/domain/rules.py).
 - **Modelos Gemini 4 e ferramentas controláveis.** O agente usa PydanticAI com streaming de raciocínio e chamadas de ferramenta. Apenas o gestor pode alternar o modelo ativo entre os quatro modelos Gemini 4 (`gemini-4-hydrogen`, `gemini-4-neon`, `gemini-4-carbon` e `gemini-4-argon`) e desativar qualquer uma das cinco ferramentas para testar limites de resposta sem invenção de dados.
+- **Guardrail de entrada System One com Jev.** Inspirado na divisão rápido e devagar documentada em [diogo.sh/system-one](https://diogo.sh/system-one/), [`src/emporio/agent/guardrails.py`](src/emporio/agent/guardrails.py) consulta o Jev (`POST https://api.typesafe.ai/v1/systemone`) antes de chamar o Gemini 4. Com probabilidades calibradas (`noul` para prompt injection com limiar `0.85` e `choice` para intenção com limiar `0.90`), tentativas de injeção, assuntos fora de tema e pedidos exclusivos de acessórios recebem resposta imediata em cerca de 240 a 320 ms sem gastar tokens do modelo principal. Consultas legítimas seguem para o agente com a etapa do guardrail visível apenas para o perfil gestor, e qualquer erro de rede faz fail-open para não interromper o atendimento.
 - **Núcleo desacoplado de canal.** O agente depende apenas dos contratos em [`src/emporio/ports.py`](src/emporio/ports.py). A API FastAPI e o frontend React atuam como um adaptador fino de entrada e saída, o que permite adicionar ou remover canais como WhatsApp sem reescrever o núcleo.
 
 ## Evals
 
 O projeto inclui uma suíte de avaliação em três camadas baseada em [diogo.sh/evals](https://diogo.sh/evals), detalhada em [`evals/README.md`](evals/README.md).
 
-- **Camada determinística sobre o trace.** [`evals/dataset.jsonl`](evals/dataset.jsonl) reúne 16 casos em oito categorias de falha (catálogo curado, disponibilidade, matemática de PIX e frete, recusa de acessórios, LGPD em dois fatores, busca vetorial no manual, ferramenta desativada e isolamento entre perfis). Os avaliadores checam chamadas e argumentos reais no trace além do texto final.
+- **Camada determinística sobre o trace.** [`evals/dataset.jsonl`](evals/dataset.jsonl) reúne 18 casos em nove categorias de falha (catálogo curado, disponibilidade, matemática de PIX e frete, recusa de acessórios, LGPD em dois fatores, busca vetorial no manual, ferramenta desativada, isolamento entre perfis e segurança do guardrail Jev). Os avaliadores checam chamadas e argumentos reais no trace além do texto final.
 - **Rótulos humanos e calibração do juiz-LLM.** [`evals/human_labels.jsonl`](evals/human_labels.jsonl) contém 14 exemplos rotulados manualmente (`7 PASS` reais e `7 FAIL` da taxonomia). Na calibração com `google:gemini-4-hydrogen`, o juiz binário atingiu 100,0% de concordância, TPR de 100,0%, TNR de 100,0% e kappa de Cohen `1.000`.
 
 ```bash
@@ -82,7 +83,7 @@ uv run python -m emporio.evals --model google:gemini-4-hydrogen --with-judge
 ## Limitações e próximos passos
 
 - **Escala vetorial.** Guardar embeddings no SQLite funciona bem para poucos documentos e evita subir um serviço adicional. Para grandes volumes de texto, o mesmo contrato de busca migraria para um banco vetorial dedicado.
-- **Expansão dos evals em produção.** A suíte atual cobre 36 testes unitários e de API mais 16 cenários de eval calibrados com 14 rótulos humanos. Em operação real, novos traces rotulados por humanos alimentariam continuamente a taxonomia e comparariam diferentes modelos Gemini 4 em latência e custo.
+- **Expansão dos evals em produção.** A suíte atual cobre 40 testes unitários e de API mais 18 cenários de eval calibrados com 14 rótulos humanos. Em operação real, novos traces rotulados por humanos alimentariam continuamente a taxonomia e comparariam diferentes modelos Gemini 4 em latência e custo.
 - **Autenticação em produção.** O login atual usa hash `scrypt` e token assinado com HMAC para simplificar a execução local. Em ambiente aberto, entrariam verificação de e-mail, revogação de sessão e limite de tentativas.
 - **Novos canais.** A interface web cobre o fluxo completo de cliente e gestor. Integrar WhatsApp ou Telegram exigiria apenas um novo adaptador sobre `ConversationService`.
 

@@ -16,6 +16,7 @@ from emporio.agent.events import (
     ToolStartEvent,
     TurnDoneEvent,
 )
+from emporio.agent.guardrails import JevInputGuardrail, get_default_guardrail
 from emporio.agent.support import SYSTEM_PROMPT, ConversationService, SupportAgent
 from emporio.agent.tools import AgentDeps
 
@@ -30,6 +31,7 @@ __all__ = [
     "AgentDeps",
     "AgentEvent",
     "ConversationService",
+    "JevInputGuardrail",
     "ModelMeta",
     "SupportAgent",
     "TextDeltaEvent",
@@ -40,4 +42,5 @@ __all__ = [
     "ToolMeta",
     "ToolStartEvent",
     "TurnDoneEvent",
+    "get_default_guardrail",
 ]

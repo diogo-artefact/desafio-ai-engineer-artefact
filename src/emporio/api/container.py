@@ -5,11 +5,12 @@ from pathlib import Path
 
 from pydantic_ai.models import Model
 
-from emporio.agent import ConversationService, SupportAgent
+from emporio.agent import ConversationService, SupportAgent, get_default_guardrail
 from emporio.auth import hash_password
 from emporio.config import Settings, get_settings
 from emporio.db import SQLiteStoreRepository
 from emporio.etl.embeddings import Embedder, get_default_embedder
+from emporio.ports import InputGuardrail
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,7 @@ class AppContainer:
         embedder: Embedder | None = None,
         model: str | Model | None = None,
         settings: Settings | None = None,
+        guardrail: InputGuardrail | None = None,
     ) -> AppContainer:
         resolved_settings = settings or get_settings()
         resolved_db = Path(db_path)
@@ -57,6 +59,7 @@ class AppContainer:
             sessions=repo,
             settings_repo=repo,
             default_model=resolved_settings.llm_model,
+            guardrail=guardrail,
         )
         return cls(
             settings=resolved_settings,
@@ -75,4 +78,5 @@ class AppContainer:
             embedder=get_default_embedder(),
             model=resolved.llm_model,
             settings=resolved,
+            guardrail=get_default_guardrail(resolved),
         )

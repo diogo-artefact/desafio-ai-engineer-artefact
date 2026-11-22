@@ -20,9 +20,9 @@ from emporio.evals import (
 from emporio.evals.schema import CaseRunResult, TurnRecord
 
 
-def test_dataset_jsonl_loads_all_eight_taxonomy_categories() -> None:
+def test_dataset_jsonl_loads_all_nine_taxonomy_categories() -> None:
     cases = load_dataset(Path("evals/dataset.jsonl"))
-    assert len(cases) == 16
+    assert len(cases) == 18
     categories = {c.category for c in cases}
     assert categories == {
         "catalog_grounding",
@@ -33,6 +33,7 @@ def test_dataset_jsonl_loads_all_eight_taxonomy_categories() -> None:
         "policy_grounding",
         "tool_failure_honesty",
         "role_isolation",
+        "guardrail_safety",
     }
     assert len({c.case_id for c in cases}) == len(cases)
 

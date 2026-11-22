@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict
 ProductStatus = Literal["active", "discontinued", "coming_soon"]
 RetrievalMode = Literal["vector", "keyword"]
 KnowledgeSourceKey = Literal["store_csvs", "policy_pdf"]
+GuardrailAction = Literal["allow", "block_adversarial", "block_accessories", "block_off_topic"]
 
 
 class PromotionInfo(BaseModel):
@@ -148,3 +149,16 @@ class KnowledgeStatus(BaseModel):
     csvs: KnowledgeSourceStatus
     pdf: KnowledgeSourceStatus
     ready: bool
+
+
+class GuardrailDecision(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    action: GuardrailAction
+    intent: str
+    intent_probability: float
+    prompt_injection_probability: float
+    latency_ms: int
+    reply: str | None = None
+    model: str = ""
+    summary: str = ""
