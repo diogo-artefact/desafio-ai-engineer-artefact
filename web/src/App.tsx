@@ -41,6 +41,7 @@ export function App() {
 
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [loadingTitleSessionId, setLoadingTitleSessionId] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<AppView>("chat");
   const [serviceReady, setServiceReady] = useState<boolean>(true);
   const [storeInfo, setStoreInfo] = useState<StoreInfo | null>(null);
@@ -83,6 +84,7 @@ export function App() {
     setUser(null);
     setSessions([]);
     setActiveSessionId(null);
+    setLoadingTitleSessionId(null);
     setMessages([]);
     setDraft("");
     setChatError(null);
@@ -322,11 +324,40 @@ export function App() {
 
     const handleStreamEvent = (event: ChatStreamEvent): void => {
       if (event.type === "session") {
+        const isNewSession = activeSessionId === null;
         streamSessionId = event.session_id;
         if (event.session_id !== activeSessionId) {
           skipNextFetchRef.current = event.session_id;
           setActiveSessionId(event.session_id);
         }
+        if (isNewSession) {
+          setLoadingTitleSessionId(event.session_id);
+        }
+        const nowIso = new Date().toISOString();
+        setSessions((prev) => {
+          if (prev.some((item) => item.session_id === event.session_id)) {
+            return prev;
+          }
+          return [
+            {
+              session_id: event.session_id,
+              title: "",
+              created_at: nowIso,
+              updated_at: nowIso,
+            },
+            ...prev,
+          ];
+        });
+        return;
+      }
+
+      if (event.type === "session_title") {
+        setLoadingTitleSessionId((prev) => (prev === event.session_id ? null : prev));
+        setSessions((prev) =>
+          prev.map((item) =>
+            item.session_id === event.session_id ? { ...item, title: event.title } : item,
+          ),
+        );
         return;
       }
 
@@ -436,6 +467,7 @@ export function App() {
           created_at: new Date().toISOString(),
         };
         setMessages((prev) => [...prev, assistantMessage]);
+        setStreaming(false);
         setStreamingText("");
         setLiveSteps([]);
         return;
@@ -495,6 +527,7 @@ export function App() {
       if (streamAbortRef.current === controller) {
         streamAbortRef.current = null;
       }
+      setLoadingTitleSessionId((prev) => (prev === streamSessionId ? null : prev));
       setStreaming(false);
       setStreamingText("");
       setLiveSteps([]);
@@ -543,6 +576,7 @@ export function App() {
         user={user}
         sessions={sessions}
         activeSessionId={activeSessionId}
+        loadingTitleSessionId={loadingTitleSessionId}
         activeView={activeView}
         collapsed={sidebarCollapsed}
         mobileOpen={mobileMenuOpen}
@@ -579,9 +613,16 @@ export function App() {
               </button>
             )}
             {showHeaderBorder && activeSession && (
-              <span className="text-[16px] font-medium leading-[140%] text-[var(--color-ink-primary)]">
-                {activeSession.title}
-              </span>
+              loadingTitleSessionId === activeSession.session_id ? (
+                <span
+                  aria-label="Gerando título da conversa"
+                  className="block h-3.5 w-40 animate-pulse rounded-[6px] bg-[var(--color-bg-hover)]"
+                />
+              ) : (
+                <span className="text-[16px] font-medium leading-[140%] text-[var(--color-ink-primary)]">
+                  {activeSession.title || "Nova conversa"}
+                </span>
+              )
             )}
           </div>
         </div>

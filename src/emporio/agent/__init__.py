@@ -7,6 +7,7 @@ from emporio.agent.events import (
     TOOL_REGISTRY,
     AgentEvent,
     ModelMeta,
+    SessionTitleEvent,
     TextDeltaEvent,
     ThinkingDeltaEvent,
     ThinkingEndEvent,
@@ -18,6 +19,11 @@ from emporio.agent.events import (
 )
 from emporio.agent.guardrails import JevInputGuardrail, get_default_guardrail
 from emporio.agent.support import SYSTEM_PROMPT, ConversationService, SupportAgent
+from emporio.agent.titles import (
+    GeminiTitleGenerator,
+    clean_generated_title,
+    get_default_title_generator,
+)
 from emporio.agent.tools import AgentDeps
 
 __all__ = [
@@ -31,8 +37,10 @@ __all__ = [
     "AgentDeps",
     "AgentEvent",
     "ConversationService",
+    "GeminiTitleGenerator",
     "JevInputGuardrail",
     "ModelMeta",
+    "SessionTitleEvent",
     "SupportAgent",
     "TextDeltaEvent",
     "ThinkingDeltaEvent",
@@ -42,5 +50,7 @@ __all__ = [
     "ToolMeta",
     "ToolStartEvent",
     "TurnDoneEvent",
+    "clean_generated_title",
     "get_default_guardrail",
+    "get_default_title_generator",
 ]

@@ -129,6 +129,7 @@ export interface ChatRequestPayload {
 
 export type ChatStreamEvent =
   | { type: "session"; session_id: string }
+  | { type: "session_title"; session_id: string; title: string }
   | { type: "thinking_start" }
   | { type: "thinking_delta"; delta: string }
   | { type: "thinking_end"; duration_ms: number; content: string }

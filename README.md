@@ -83,7 +83,7 @@ uv run python -m emporio.evals --model google:gemini-4-hydrogen --with-judge
 ## Limitações e próximos passos
 
 - **Escala vetorial.** Guardar embeddings no SQLite funciona bem para poucos documentos e evita subir um serviço adicional. Para grandes volumes de texto, o mesmo contrato de busca migraria para um banco vetorial dedicado.
-- **Expansão dos evals em produção.** A suíte atual cobre 40 testes unitários e de API mais 18 cenários de eval calibrados com 14 rótulos humanos. Em operação real, novos traces rotulados por humanos alimentariam continuamente a taxonomia e comparariam diferentes modelos Gemini 4 em latência e custo.
+- **Expansão dos evals em produção.** A suíte atual cobre 44 testes unitários e de API mais 18 cenários de eval calibrados com 14 rótulos humanos. Em operação real, novos traces rotulados por humanos alimentariam continuamente a taxonomia e comparariam diferentes modelos Gemini 4 em latência e custo.
 - **Autenticação em produção.** O login atual usa hash `scrypt` e token assinado com HMAC para simplificar a execução local. Em ambiente aberto, entrariam verificação de e-mail, revogação de sessão e limite de tentativas.
 - **Novos canais.** A interface web cobre o fluxo completo de cliente e gestor. Integrar WhatsApp ou Telegram exigiria apenas um novo adaptador sobre `ConversationService`.
 

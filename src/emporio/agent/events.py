@@ -134,6 +134,13 @@ class TextDeltaEvent(BaseModel):
     delta: str
 
 
+class SessionTitleEvent(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    type: Literal["session_title"] = "session_title"
+    session_id: str
+    title: str
+
+
 class TurnDoneEvent(BaseModel):
     model_config = ConfigDict(frozen=True)
     type: Literal["done"] = "done"
@@ -148,5 +155,6 @@ AgentEvent = (
     | ToolStartEvent
     | ToolEndEvent
     | TextDeltaEvent
+    | SessionTitleEvent
     | TurnDoneEvent
 )

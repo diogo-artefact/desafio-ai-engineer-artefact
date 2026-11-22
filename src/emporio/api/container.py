@@ -5,12 +5,17 @@ from pathlib import Path
 
 from pydantic_ai.models import Model
 
-from emporio.agent import ConversationService, SupportAgent, get_default_guardrail
+from emporio.agent import (
+    ConversationService,
+    SupportAgent,
+    get_default_guardrail,
+    get_default_title_generator,
+)
 from emporio.auth import hash_password
 from emporio.config import Settings, get_settings
 from emporio.db import SQLiteStoreRepository
 from emporio.etl.embeddings import Embedder, get_default_embedder
-from emporio.ports import InputGuardrail
+from emporio.ports import InputGuardrail, TitleGenerator
 
 
 @dataclass(frozen=True)
@@ -31,6 +36,7 @@ class AppContainer:
         model: str | Model | None = None,
         settings: Settings | None = None,
         guardrail: InputGuardrail | None = None,
+        title_generator: TitleGenerator | None = None,
     ) -> AppContainer:
         resolved_settings = settings or get_settings()
         resolved_db = Path(db_path)
@@ -60,6 +66,7 @@ class AppContainer:
             settings_repo=repo,
             default_model=resolved_settings.llm_model,
             guardrail=guardrail,
+            title_generator=title_generator,
         )
         return cls(
             settings=resolved_settings,
@@ -79,4 +86,5 @@ class AppContainer:
             model=resolved.llm_model,
             settings=resolved,
             guardrail=get_default_guardrail(resolved),
+            title_generator=get_default_title_generator(resolved),
         )

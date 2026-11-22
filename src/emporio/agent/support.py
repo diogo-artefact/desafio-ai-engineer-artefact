@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -32,6 +33,7 @@ from emporio.agent.events import (
     DEFAULT_MODEL_ID,
     TOOL_META_BY_ID,
     AgentEvent,
+    SessionTitleEvent,
     TextDeltaEvent,
     ThinkingDeltaEvent,
     ThinkingEndEvent,
@@ -51,6 +53,7 @@ from emporio.ports import (
     PolicyRetriever,
     SessionRepository,
     SettingsRepository,
+    TitleGenerator,
 )
 
 SYSTEM_PROMPT = (
@@ -373,6 +376,7 @@ class ConversationService:
         settings_repo: SettingsRepository | None = None,
         default_model: str = DEFAULT_MODEL_ID,
         guardrail: InputGuardrail | None = None,
+        title_generator: TitleGenerator | None = None,
     ) -> None:
         self._agent = agent
         self._catalog = catalog
@@ -385,6 +389,15 @@ class ConversationService:
             default_model if default_model in ALLOWED_MODEL_IDS else DEFAULT_MODEL_ID
         )
         self._guardrail = guardrail
+        self._title_generator = title_generator
+
+    async def _run_title_task(self, message: str) -> str | None:
+        if self._title_generator is None:
+            return None
+        try:
+            return await self._title_generator.generate(message)
+        except Exception:
+            return None
 
     def resolve_active_model(self) -> str:
         if self._settings is not None:
@@ -422,72 +435,125 @@ class ConversationService:
         history = self._ensure_session(session_id, message, user_id=user_id)
         self._sessions.append_message(session_id, "user", message)
 
-        guardrail_trace: dict[str, Any] | None = None
-        if self._guardrail is not None:
-            call_id = "guardrail-jev"
-            yield ToolStartEvent(
-                tool_call_id=call_id,
-                tool_name="jev_guardrail",
-                label="Verificando guardrail (Jev)",
-                args={},
-            )
-            decision = await self._guardrail.check(message, history)
-            guardrail_args: dict[str, Any] = {
-                "intent": decision.intent,
-                "probability": decision.intent_probability,
-                "prompt_injection": decision.prompt_injection_probability,
-            }
-            guardrail_trace = {
-                "type": "tool",
-                "tool_name": "jev_guardrail",
-                "label": "Verificou guardrail (Jev)",
-                "summary": decision.summary,
-                "args": guardrail_args,
-                "duration_ms": decision.latency_ms,
-            }
-            yield ToolEndEvent(
-                tool_call_id=call_id,
-                tool_name="jev_guardrail",
-                label="Verificou guardrail (Jev)",
-                summary=decision.summary,
-                duration_ms=decision.latency_ms,
-            )
-            if decision.action != "allow" and decision.reply:
-                yield TextDeltaEvent(delta=decision.reply)
-                self._sessions.append_message(
-                    session_id,
-                    "assistant",
-                    decision.reply,
-                    trace=[guardrail_trace],
-                )
-                yield TurnDoneEvent(text=decision.reply, trace=[guardrail_trace])
-                return
+        title_task: asyncio.Task[str | None] | None = (
+            asyncio.create_task(self._run_title_task(message))
+            if not history and self._title_generator is not None
+            else None
+        )
+        title_emitted = False
 
-        deps = AgentDeps(
-            catalog=self._catalog,
-            orders=self._orders,
-            policies=self._policies,
-            knowledge=self._knowledge,
-            enabled_tools=enabled_tools if enabled_tools is not None else ALL_TOOL_IDS,
-            user_role=user_role,
-            reference_time=reference_time,
-        )
-        model_override = (
-            self.resolve_active_model() if self._agent.allows_runtime_model_override else None
-        )
-        async for event in self._agent.stream_turn(
-            message, history, deps, model_override=model_override
-        ):
-            if isinstance(event, TurnDoneEvent):
-                full_trace = (
-                    [guardrail_trace, *event.trace] if guardrail_trace is not None else event.trace
+        def _consume_ready_title() -> SessionTitleEvent | None:
+            nonlocal title_emitted
+            if title_emitted or title_task is None or not title_task.done():
+                return None
+            title_emitted = True
+            if title_task.cancelled():
+                return None
+            generated = title_task.result()
+            if not generated:
+                return None
+            self._sessions.update_session_title(session_id, generated)
+            return SessionTitleEvent(session_id=session_id, title=generated)
+
+        async def _finalize_pending_title() -> SessionTitleEvent | None:
+            nonlocal title_emitted
+            if title_emitted or title_task is None:
+                return None
+            title_emitted = True
+            try:
+                generated = await asyncio.wait_for(title_task, timeout=6.0)
+            except (TimeoutError, asyncio.CancelledError):
+                title_task.cancel()
+                return None
+            if not generated:
+                return None
+            self._sessions.update_session_title(session_id, generated)
+            return SessionTitleEvent(session_id=session_id, title=generated)
+
+        try:
+            guardrail_trace: dict[str, Any] | None = None
+            if self._guardrail is not None:
+                call_id = "guardrail-jev"
+                yield ToolStartEvent(
+                    tool_call_id=call_id,
+                    tool_name="jev_guardrail",
+                    label="Verificando guardrail (Jev)",
+                    args={},
                 )
-                self._sessions.append_message(
-                    session_id, "assistant", event.text, trace=full_trace
+                decision = await self._guardrail.check(message, history)
+                guardrail_args: dict[str, Any] = {
+                    "intent": decision.intent,
+                    "probability": decision.intent_probability,
+                    "prompt_injection": decision.prompt_injection_probability,
+                }
+                guardrail_trace = {
+                    "type": "tool",
+                    "tool_name": "jev_guardrail",
+                    "label": "Verificou guardrail (Jev)",
+                    "summary": decision.summary,
+                    "args": guardrail_args,
+                    "duration_ms": decision.latency_ms,
+                }
+                yield ToolEndEvent(
+                    tool_call_id=call_id,
+                    tool_name="jev_guardrail",
+                    label="Verificou guardrail (Jev)",
+                    summary=decision.summary,
+                    duration_ms=decision.latency_ms,
                 )
-                yield TurnDoneEvent(text=event.text, trace=full_trace)
-                continue
-            yield event
+                if decision.action != "allow" and decision.reply:
+                    yield TextDeltaEvent(delta=decision.reply)
+                    self._sessions.append_message(
+                        session_id,
+                        "assistant",
+                        decision.reply,
+                        trace=[guardrail_trace],
+                    )
+                    yield TurnDoneEvent(text=decision.reply, trace=[guardrail_trace])
+                    title_event = await _finalize_pending_title()
+                    if title_event is not None:
+                        yield title_event
+                    return
+
+            deps = AgentDeps(
+                catalog=self._catalog,
+                orders=self._orders,
+                policies=self._policies,
+                knowledge=self._knowledge,
+                enabled_tools=enabled_tools if enabled_tools is not None else ALL_TOOL_IDS,
+                user_role=user_role,
+                reference_time=reference_time,
+            )
+            model_override = (
+                self.resolve_active_model() if self._agent.allows_runtime_model_override else None
+            )
+            async for event in self._agent.stream_turn(
+                message, history, deps, model_override=model_override
+            ):
+                if isinstance(event, TurnDoneEvent):
+                    full_trace = (
+                        [guardrail_trace, *event.trace]
+                        if guardrail_trace is not None
+                        else event.trace
+                    )
+                    self._sessions.append_message(
+                        session_id, "assistant", event.text, trace=full_trace
+                    )
+                    ready_title = _consume_ready_title()
+                    if ready_title is not None:
+                        yield ready_title
+                    yield TurnDoneEvent(text=event.text, trace=full_trace)
+                    pending_title = await _finalize_pending_title()
+                    if pending_title is not None:
+                        yield pending_title
+                    continue
+                yield event
+                ready_title = _consume_ready_title()
+                if ready_title is not None:
+                    yield ready_title
+        finally:
+            if title_task is not None and not title_task.done():
+                title_task.cancel()
 
     async def send_message(
         self,

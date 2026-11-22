@@ -60,6 +60,10 @@ class InputGuardrail(Protocol):
     ) -> GuardrailDecision: ...
 
 
+class TitleGenerator(Protocol):
+    async def generate(self, message: str) -> str | None: ...
+
+
 class UserRepository(Protocol):
     def get_user_by_id(self, user_id: str) -> AuthenticatedUser | None: ...
 

@@ -9,6 +9,7 @@ interface SidebarProps {
   user: AuthUser;
   sessions: SessionSummary[];
   activeSessionId: string | null;
+  loadingTitleSessionId?: string | null;
   activeView: AppView;
   collapsed: boolean;
   mobileOpen: boolean;
@@ -29,11 +30,13 @@ interface SidebarContentProps extends Omit<SidebarProps, "collapsed" | "mobileOp
 function SessionRow({
   session,
   active,
+  loadingTitle,
   onSelect,
   onDelete,
 }: {
   session: SessionSummary;
   active: boolean;
+  loadingTitle: boolean;
   onSelect: () => void;
   onDelete: () => void;
 }) {
@@ -54,7 +57,14 @@ function SessionRow({
             : "font-normal text-[var(--color-ink-secondary)] group-hover:text-[var(--color-ink-primary)]"
         }`}
       >
-        <span className="truncate">{session.title}</span>
+        {loadingTitle ? (
+          <span
+            aria-label="Gerando título da conversa"
+            className="block h-3 w-32 animate-pulse rounded-[6px] bg-[var(--color-border-strong)]"
+          />
+        ) : (
+          <span className="truncate">{session.title || "Nova conversa"}</span>
+        )}
       </button>
       <button
         type="button"
@@ -62,7 +72,7 @@ function SessionRow({
           event.stopPropagation();
           onDelete();
         }}
-        aria-label={`Excluir conversa ${session.title}`}
+        aria-label={`Excluir conversa ${session.title || "atual"}`}
         className="mr-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-[6px] border-0 bg-transparent text-[var(--color-ink-muted)] opacity-0 transition-opacity hover:text-[var(--color-status-danger)] focus:opacity-100 group-hover:opacity-100"
       >
         <Trash2 size={14} strokeWidth={1.5} />
@@ -75,6 +85,7 @@ function SidebarContent({
   user,
   sessions,
   activeSessionId,
+  loadingTitleSessionId,
   activeView,
   isMobileDrawer,
   onToggleCollapse,
@@ -147,6 +158,7 @@ function SidebarContent({
                       key={session.session_id}
                       session={session}
                       active={activeView === "chat" && activeSessionId === session.session_id}
+                      loadingTitle={loadingTitleSessionId === session.session_id}
                       onSelect={wrapMobileClose(() => onSelectSession(session.session_id))}
                       onDelete={() => onDeleteSession(session.session_id)}
                     />
@@ -164,6 +176,7 @@ function SidebarContent({
                       key={session.session_id}
                       session={session}
                       active={activeView === "chat" && activeSessionId === session.session_id}
+                      loadingTitle={loadingTitleSessionId === session.session_id}
                       onSelect={wrapMobileClose(() => onSelectSession(session.session_id))}
                       onDelete={() => onDeleteSession(session.session_id)}
                     />
